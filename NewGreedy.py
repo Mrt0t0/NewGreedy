@@ -1,30 +1,25 @@
 """
-# NewGreedy v0.6 - Progressive Upload Multiplier Proxy
+# NewGreedy v0.7 - Progressive Upload Multiplier Proxy
+# Mrt0t0
 
 ### Description
 
-NewGreedy v0.6 is an advanced HTTP proxy for BitTorrent clients. It intercepts tracker "announce" requests and intelligently modifies the `uploaded` statistic. This version uses a **progressive multiplier**, which starts at 1.0 and linearly increases to a configurable maximum over a set duration, making the reported upload values appear more natural.
+NewGreedy v0.7 is a HTTP proxy for BitTorrent clients. (GreedyTorrent Like).
+
+It intercepts tracker "announce" requests and intelligently modifies the `uploaded` statistic. This version uses a **progressive multiplier** that starts at 1.0 and linearly increases to a configurable maximum over a set duration.
+
+This version introduces **dual logging**: all activity is logged simultaneously to the console for real-time monitoring and to a file for persistent records.
 
 The reported upload is calculated as: `Reported Upload = Real Downloaded * Progressive Multiplier`.
 
-Logs are displayed directly in the console for real-time monitoring, with data values shown in Megabytes (MB).
-
 ### Features
 
--   **Progressive Multiplier**: The upload multiplier ramps up over time, simulating a more realistic upload behavior.
--   **Download-Based Calculation**: Bases the fake upload on the amount of data downloaded, ensuring a steady increase in reported ratio.
--   **Safe Parameter Handling**: Uses regular expressions to modify *only* the `uploaded` value, preventing corruption of other critical parameters.
--   **Real-time Console Logging**: All activity is logged directly to the console for immediate feedback.
--   **Human-Readable Values**: Reports downloaded and uploaded amounts in Megabytes (MB) in the logs.
--   **Multi-Threaded**: Handles multiple simultaneous client connections without blocking.
-
-### How It Works
-
-1.  The proxy listens for tracker requests from your torrent client.
-2.  It calculates the current multiplier based on how long the script has been running.
-3.  It reads the `downloaded` value and computes the new `uploaded` value using the progressive multiplier.
-4.  It safely replaces the original `uploaded` value in the URL and forwards the modified request to the tracker.
-5.  All steps are logged to the console in real-time.
+-   **Progressive Multiplier**: Simulates realistic upload behavior over time.
+-   **Download-Based Calculation**: Ensures a steady increase in reported ratio.
+-   **Dual Logging**: Logs activity to both the console and a file.
+-   **Log Rotation**: Automatically deletes old log files to save space.
+-   **Safe Parameter Handling**: Prevents corruption of critical tracker parameters.
+-   **Multi-Threaded**: Handles multiple simultaneous client connections.
 
 ### Dependencies
 
@@ -34,15 +29,31 @@ Logs are displayed directly in the console for real-time monitoring, with data v
 ### Configuration (`config.ini`)
 
 -   `listen_port`: The local port the proxy listens on.
--   `max_upload_multiplier`: The target multiplier to be reached over time (e.g., `5.0` for 5x).
--   `ramp_up_seconds`: The duration (in seconds) for the multiplier to increase from 1.0 to its maximum value (e.g., `3600` for 1 hour).
+-   `max_upload_multiplier`: The target multiplier to be reached.
+-   `ramp_up_seconds`: The duration for the multiplier to increase to its max.
+-   `log_file`: The path for the persistent log file.
+-   `log_retention_days`: How long to keep the log file before deleting it.
 
-### Usage
+### Installation & Usage
 
-1.  Customize `config.ini` with your desired settings.
-2.  Run the script: `python NewGreedy.py`.
-3.  Configure your torrent client's HTTP proxy settings to `localhost` and the `listen_port`.
-4.  Monitor the console output to see the multiplier and data modification in action.
+1.  **Clone the repository:**
+    ```
+    git clone https://github.com/Mrt0t0/NewGreedy.git
+    cd NewGreedy
+    ```
+
+2.  **Customize `config.ini`** to set your preferences.
+
+3.  **Run the installation script:**
+    ```
+    chmod +x install.sh
+    sudo ./install.sh
+    ```
+
+4.  **Monitor the service:**
+    -   **Live Console & File Logs:** Logs are now visible in `journalctl` and saved to the path specified by `log_file`.
+    -   `sudo systemctl status newgreedy.service`
+    -   `journalctl -u newgreedy.service -f`
 """
 
 import http.server
@@ -66,46 +77,62 @@ config.read('config.ini')
 LISTEN_PORT = int(config['DEFAULT'].get('listen_port', 3456))
 MAX_UPLOAD_MULTIPLIER = float(config['DEFAULT'].get('max_upload_multiplier', 5.0))
 RAMP_UP_SECONDS = int(config['DEFAULT'].get('ramp_up_seconds', 3600))
+LOG_FILE = config['LOGGING'].get('log_file', 'newgreedy.log')
+LOG_RETENTION_DAYS = int(config['LOGGING'].get('log_retention_days', 7))
 
-# --- Logging Setup ---
-# Log to console instead of a file by removing the 'filename' parameter.
+# --- Dual Logging Setup ---
+# Configure logging to output to both a file and the console.
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    datefmt='%Y-%m-%d %H:%M:%S',
+    handlers=[
+        logging.FileHandler(LOG_FILE),
+        logging.StreamHandler()
+    ]
 )
 
 def get_progressive_multiplier(max_multiplier, ramp_up_duration):
-    """
-    Calculates a multiplier that increases linearly from 1.0 to max_multiplier.
-    """
+    """Calculates a multiplier that increases linearly over time."""
     elapsed_time = time.time() - SCRIPT_START_TIME
     if elapsed_time >= ramp_up_duration:
         return max_multiplier
     else:
         return 1.0 + (max_multiplier - 1.0) * (elapsed_time / ramp_up_duration)
 
+def cleanup_old_logs(logfile_path, retention_days):
+    """Deletes the log file if it's older than the retention period."""
+    if os.path.exists(logfile_path):
+        file_age_seconds = time.time() - os.path.getmtime(logfile_path)
+        if file_age_seconds > (retention_days * 86400):
+            try:
+                os.remove(logfile_path)
+                logging.info(f"Old log file '{logfile_path}' deleted.")
+            except OSError as e:
+                logging.error(f"Error deleting log file: {e}")
+
+def log_cleanup_worker():
+    """Background thread that runs log cleanup once a day."""
+    while True:
+        cleanup_old_logs(LOG_FILE, LOG_RETENTION_DAYS)
+        time.sleep(86400)
+
 class NewGreedyProxyHandler(http.server.BaseHTTPRequestHandler):
-    """
-    HTTP proxy handler that uses a progressive multiplier and logs to console.
-    """
+    """HTTP proxy handler with progressive multiplier and dual logging."""
     def do_GET(self):
         try:
             full_url = self.path
-            # Initial log with the raw URL
-            logging.info(f"Intercepted GET request for: {full_url[:120]}...") # Truncate for readability
+            logging.info(f"Intercepted GET: {full_url[:120]}...")
 
             parsed_url = urllib.parse.urlsplit(full_url)
             query_string = parsed_url.query
+            new_query_string = query_string
 
             downloaded_match = re.search(r'downloaded=(\d+)', query_string)
             uploaded_match = re.search(r'uploaded=(\d+)', query_string)
 
-            new_query_string = query_string
-
             if downloaded_match and uploaded_match:
                 real_downloaded_bytes = int(downloaded_match.group(1))
-
                 multiplier = get_progressive_multiplier(MAX_UPLOAD_MULTIPLIER, RAMP_UP_SECONDS)
                 new_uploaded_bytes = int(real_downloaded_bytes * multiplier)
 
@@ -114,18 +141,13 @@ class NewGreedyProxyHandler(http.server.BaseHTTPRequestHandler):
 
                 new_query_string = query_string.replace(original_uploaded_str, new_uploaded_str)
 
-                # Log values in Megabytes (MB) for better readability
                 logging.info(
                     f"Multiplier: {multiplier:.3f} | "
                     f"Downloaded: {real_downloaded_bytes / (1024*1024):.2f} MB | "
                     f"Reported Upload: {new_uploaded_bytes / (1024*1024):.2f} MB"
                 )
-            else:
-                logging.warning("Missing 'downloaded' or 'uploaded' params. Forwarding original query.")
 
-            target_path_and_query = parsed_url.path
-            if new_query_string:
-                target_path_and_query += '?' + new_query_string
+            target_path_and_query = parsed_url.path + ('?' + new_query_string if new_query_string else '')
 
             forward_headers = dict(self.headers)
             forward_headers['Host'] = parsed_url.netloc
@@ -143,27 +165,29 @@ class NewGreedyProxyHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
 
             for chunk in response.iter_content(chunk_size=8192):
-                self.wfile.write(chunk)
+                if chunk:
+                    self.wfile.write(chunk)
 
-        except requests.exceptions.RequestException as e:
-            logging.error(f"Network error connecting to tracker: {e}")
-            self.send_error(504, "Gateway Timeout")
         except Exception as e:
             logging.error(f"An unexpected error occurred: {e}")
-            self.send_error(500, "Internal Server Error")
+            if not self.wfile.closed:
+                self.send_error(500, "Internal Server Error")
 
     def log_message(self, format, *args):
-        # Suppress default console logging to avoid duplicate messages
+        # Suppress default server logging to avoid duplicate messages.
         return
 
 def run_proxy_server():
     """Sets up and runs the threaded HTTP proxy server."""
+    # Start the log cleanup worker in a separate thread.
+    cleanup_thread = Thread(target=log_cleanup_worker, daemon=True)
+    cleanup_thread.start()
+
     with socketserver.ThreadingTCPServer(("", LISTEN_PORT), NewGreedyProxyHandler) as httpd:
-        print("--- NewGreedy v0.6 (Progressive Multiplier & Console Log) ---")
+        print("--- NewGreedy v0.7 (Dual Logging) ---")
         print(f"Listening on port: {LISTEN_PORT}")
         print(f"Max Upload Multiplier: x{MAX_UPLOAD_MULTIPLIER}")
-        print(f"Ramp-up Time: {RAMP_UP_SECONDS} seconds")
-        print("Proxy is running. Logs will be displayed below.")
+        print(f"Logs are being written to console and to '{LOG_FILE}'")
         logging.info("Server startup complete.")
         httpd.serve_forever()
 
