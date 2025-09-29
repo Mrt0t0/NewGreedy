@@ -1,30 +1,39 @@
-# NewGreedy v0.6 - Progressive Upload Multiplier BitTorrent Client Proxy
+# NewGreedy v0.7 - Progressive Upload Multiplier Proxy
+# Mrt0t0
 
 ### Description
 
-NewGreedy v0.6 is an advanced HTTP proxy for BitTorrent clients. (Greedy Torrent Like). 
+NewGreedy v0.7 is a HTTP proxy for BitTorrent clients. (GreedyTorrent Like).
 
-It intercepts tracker "announce" requests and intelligently modifies the `uploaded` statistic.
-This version uses a **progressive multiplier**, which starts at 1.0 and linearly increases to a configurable maximum over a set duration, making the reported upload values appear more natural.
+It intercepts tracker "announce" requests and intelligently modifies the `uploaded` statistic. This version uses a **progressive multiplier** that starts at 1.0 and linearly increases to a configurable maximum over a set duration.
+
+This version introduces **dual logging**: all activity is logged simultaneously to the console for real-time monitoring and to a file for persistent records.
 
 The reported upload is calculated as: `Reported Upload = Real Downloaded * Progressive Multiplier`.
 
-Logs are displayed directly in the console for real-time monitoring, with data values shown in Megabytes (MB).
-
 ### Features
 
--   **Progressive Multiplier**: Simulates realistic upload behavior.
+-   **Progressive Multiplier**: Simulates realistic upload behavior over time.
 -   **Download-Based Calculation**: Ensures a steady increase in reported ratio.
+-   **Dual Logging**: Logs activity to both the console and a file.
+-   **Log Rotation**: Automatically deletes old log files to save space.
 -   **Safe Parameter Handling**: Prevents corruption of critical tracker parameters.
--   **Real-time Console Logging**: Provides immediate feedback on proxy activity.
--   **Multi-Threaded & Robust**: Handles multiple connections and restarts on failure via `systemd`.
+-   **Multi-Threaded**: Handles multiple simultaneous client connections.
 
 ### Dependencies
 
 -   Python 3.x
 -   `requests` library (`pip install requests`)
 
-### Installation (Linux with systemd)
+### Configuration (`config.ini`)
+
+-   `listen_port`: The local port the proxy listens on.
+-   `max_upload_multiplier`: The target multiplier to be reached.
+-   `ramp_up_seconds`: The duration for the multiplier to increase to its max.
+-   `log_file`: The path for the persistent log file.
+-   `log_retention_days`: How long to keep the log file before deleting it.
+
+### Installation & Usage
 
 1.  **Clone the repository:**
     ```
@@ -32,34 +41,15 @@ Logs are displayed directly in the console for real-time monitoring, with data v
     cd NewGreedy
     ```
 
-2.  **Customize the configuration (optional):**
-    Edit `config.ini` to change the port, multiplier, or ramp-up time.
+2.  **Customize `config.ini`** to set your preferences.
 
 3.  **Run the installation script:**
-    The script will copy the files, set up, and start the `systemd` service for you.
     ```
     chmod +x install.sh
     sudo ./install.sh
     ```
 
-### Usage After Installation
-
-The proxy will now run automatically in the background.
-
--   **Check the service status:**
-    ```
-    sudo systemctl status newgreedy.service
-    ```
-
--   **View live logs:**
-    ```
-    journalctl -u newgreedy.service -f
-    ```
-
--   **Configure your torrent client** (qBittorrent, Transmission, etc.) to use an HTTP proxy at `localhost` on the port specified in `config.ini` (default: `3456`).
-
-### Configuration (`config.ini`)
-
--   `listen_port`: The local port the proxy listens on.
--   `max_upload_multiplier`: The target multiplier to be reached over time.
--   `ramp_up_seconds`: The duration (in seconds) for the multiplier to increase from 1.0 to its maximum.
+4.  **Monitor the service:**
+    -   **Live Console & File Logs:** Logs are now visible in `journalctl` and saved to the path specified by `log_file`.
+    -   `sudo systemctl status newgreedy.service`
+    -   `journalctl -u newgreedy.service -f`
