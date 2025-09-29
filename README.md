@@ -1,8 +1,11 @@
-# NewGreedy v0.6 - Progressive Upload Multiplier Proxy
+# NewGreedy v0.6 - Progressive Upload Multiplier BitTorrent Client Proxy
 
 ### Description
 
-NewGreedy v0.6 is an advanced HTTP proxy for BitTorrent clients. (GreedyTorrent Like) It intercepts tracker "announce" requests and intelligently modifies the `uploaded` statistic. This version uses a **progressive multiplier**, which starts at 1.0 and linearly increases to a configurable maximum over a set duration, making the reported upload values appear more natural.
+NewGreedy v0.6 is an advanced HTTP proxy for BitTorrent clients. (Greedy Torrent Like). 
+
+It intercepts tracker "announce" requests and intelligently modifies the `uploaded` statistic.
+This version uses a **progressive multiplier**, which starts at 1.0 and linearly increases to a configurable maximum over a set duration, making the reported upload values appear more natural.
 
 The reported upload is calculated as: `Reported Upload = Real Downloaded * Progressive Multiplier`.
 
@@ -10,36 +13,53 @@ Logs are displayed directly in the console for real-time monitoring, with data v
 
 ### Features
 
--   **Progressive Multiplier**: The upload multiplier ramps up over time, simulating a more realistic upload behavior.
--   **Download-Based Calculation**: Bases the fake upload on the amount of data downloaded, ensuring a steady increase in reported ratio.
--   **Safe Parameter Handling**: Uses regular expressions to modify *only* the `uploaded` value, preventing corruption of other critical parameters.
--   **Real-time Console Logging**: All activity is logged directly to the console for immediate feedback.
--   **Human-Readable Values**: Reports downloaded and uploaded amounts in Megabytes (MB) in the logs.
--   **Multi-Threaded**: Handles multiple simultaneous client connections without blocking.
-
-### How It Works
-
-1.  The proxy listens for tracker requests from your torrent client.
-2.  It calculates the current multiplier based on how long the script has been running.
-3.  It reads the `downloaded` value and computes the new `uploaded` value using the progressive multiplier.
-4.  It safely replaces the original `uploaded` value in the URL and forwards the modified request to the tracker.
-5.  All steps are logged to the console in real-time.
+-   **Progressive Multiplier**: Simulates realistic upload behavior.
+-   **Download-Based Calculation**: Ensures a steady increase in reported ratio.
+-   **Safe Parameter Handling**: Prevents corruption of critical tracker parameters.
+-   **Real-time Console Logging**: Provides immediate feedback on proxy activity.
+-   **Multi-Threaded & Robust**: Handles multiple connections and restarts on failure via `systemd`.
 
 ### Dependencies
 
 -   Python 3.x
 -   `requests` library (`pip install requests`)
 
+### Installation (Linux with systemd)
+
+1.  **Clone the repository:**
+    ```
+    git clone https://github.com/Mrt0t0/NewGreedy.git
+    cd NewGreedy
+    ```
+
+2.  **Customize the configuration (optional):**
+    Edit `config.ini` to change the port, multiplier, or ramp-up time.
+
+3.  **Run the installation script:**
+    The script will copy the files, set up, and start the `systemd` service for you.
+    ```
+    chmod +x install.sh
+    sudo ./install.sh
+    ```
+
+### Usage After Installation
+
+The proxy will now run automatically in the background.
+
+-   **Check the service status:**
+    ```
+    sudo systemctl status newgreedy.service
+    ```
+
+-   **View live logs:**
+    ```
+    journalctl -u newgreedy.service -f
+    ```
+
+-   **Configure your torrent client** (qBittorrent, Transmission, etc.) to use an HTTP proxy at `localhost` on the port specified in `config.ini` (default: `3456`).
+
 ### Configuration (`config.ini`)
 
 -   `listen_port`: The local port the proxy listens on.
--   `max_upload_multiplier`: The target multiplier to be reached over time (e.g., `5.0` for 5x).
--   `ramp_up_seconds`: The duration (in seconds) for the multiplier to increase from 1.0 to its maximum value (e.g., `3600` for 1 hour).
-
-### Usage
-
-1.  Customize `config.ini` with your desired settings.
-2.  Run the script: `python NewGreedy.py`.
-3.  Configure your torrent client's HTTP proxy settings to `localhost` and the `listen_port`.
-4.  Monitor the console output to see the multiplier and data modification in action.
-"""
+-   `max_upload_multiplier`: The target multiplier to be reached over time.
+-   `ramp_up_seconds`: The duration (in seconds) for the multiplier to increase from 1.0 to its maximum.
