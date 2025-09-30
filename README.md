@@ -1,4 +1,4 @@
-# NewGreedy v0.8 - Advanced CLI Proxy
+# NewGreedy v0.8 - Advanced CLI HTTP proxy for BitTorrent clients
 Mrt0t0 / [https://github.com/Mrt0t0/NewGreedy](https://github.com/Mrt0t0/NewGreedy)
 
 ### Description
