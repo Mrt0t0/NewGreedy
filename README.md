@@ -1,24 +1,23 @@
-# NewGreedy v0.7 - Progressive Upload Multiplier Proxy
-# Mrt0t0
+# NewGreedy v0.8 - Advanced CLI Proxy
+Mrt0t0 / [https://github.com/Mrt0t0/NewGreedy](https://github.com/Mrt0t0/NewGreedy)
 
 ### Description
 
-NewGreedy v0.7 is a HTTP proxy for BitTorrent clients. (GreedyTorrent Like).
+NewGreedy is a HTTP proxy for BitTorrent clients (GreedyTorrent-like).
 
-It intercepts tracker "announce" requests and intelligently modifies the `uploaded` statistic. This version uses a **progressive multiplier** that starts at 1.0 and linearly increases to a configurable maximum over a set duration.
+It intercepts tracker "announce" requests and intelligently modifies the `uploaded` statistic. This version uses advanced, configurable logic to simulate realistic upload behavior and avoid detection.
 
-This version introduces **dual logging**: all activity is logged simultaneously to the console for real-time monitoring and to a file for persistent records.
-
-The reported upload is calculated as: `Reported Upload = Real Downloaded * Progressive Multiplier`.
+The reported upload is calculated using a dynamic multiplier, with several safety features built-in.
 
 ### Features
 
--   **Progressive Multiplier**: Simulates realistic upload behavior over time.
--   **Download-Based Calculation**: Ensures a steady increase in reported ratio.
--   **Dual Logging**: Logs activity to both the console and a file.
--   **Log Rotation**: Automatically deletes old log files to save space.
--   **Safe Parameter Handling**: Prevents corruption of critical tracker parameters.
--   **Multi-Threaded**: Handles multiple simultaneous client connections.
+-   **Automatic Update Checker**: Checks for new versions on GitHub on startup and notifies the user in the logs.
+-   **Global Ratio Limiter**: Automatically disables the upload multiplier if the overall ratio exceeds a safe, user-defined limit.
+-   **Randomized Multiplier**: Adds a random variation to the multiplier, making upload patterns appear more natural and less robotic.
+-   **Simulated Upload Speed Cap**: Prevents unrealistic upload speed spikes by capping the reported upload rate to a configurable maximum.
+-   **Maximum Tracker Compatibility**: Uses a direct string replacement method to preserve the original URL structure and prevent tracker errors.
+-   **Dual Logging**: Logs all activity to both the console and a persistent file for easy monitoring.
+-   **Multi-Threaded**: Handles multiple simultaneous client connections without blocking.
 
 ### Dependencies
 
@@ -28,10 +27,11 @@ The reported upload is calculated as: `Reported Upload = Real Downloaded * Progr
 ### Configuration (`config.ini`)
 
 -   `listen_port`: The local port the proxy listens on.
--   `max_upload_multiplier`: The target multiplier to be reached.
--   `ramp_up_seconds`: The duration for the multiplier to increase to its max.
+-   `max_upload_multiplier`: The target multiplier to be applied to your download amount.
+-   `randomization_factor`: The percentage of random variation (e.g., `0.1` for +/-10%).
+-   `max_simulated_speed_mbps`: The maximum upload speed (in Megabits-per-second) that the script will simulate.
+-   `global_ratio_limit`: The global ratio at which the script will stop multiplying.
 -   `log_file`: The path for the persistent log file.
--   `log_retention_days`: How long to keep the log file before deleting it.
 
 ### Installation & Usage
 
@@ -43,7 +43,7 @@ The reported upload is calculated as: `Reported Upload = Real Downloaded * Progr
 
 2.  **Customize `config.ini`** to set your preferences.
 
-3.  **Run the installation script:**
+3.  **Run the installation script** to set up the systemd service:
     ```
     chmod +x install.sh
     sudo ./install.sh
@@ -51,5 +51,5 @@ The reported upload is calculated as: `Reported Upload = Real Downloaded * Progr
 
 4.  **Monitor the service:**
     -   **Live Console & File Logs:** Logs are now visible in `journalctl` and saved to the path specified by `log_file`.
-    -   `sudo systemctl status newgreedy.service`
-    -   `journalctl -u newgreedy.service -f`
+    -   Check the status: `sudo systemctl status newgreedy.service`
+    -   View live logs: `journalctl -u newgreedy.service -f`
