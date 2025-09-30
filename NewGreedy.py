@@ -1,59 +1,23 @@
 """
-# NewGreedy v0.7 - Progressive Upload Multiplier Proxy
-# Mrt0t0
+# NewGreedy v0.8
 
-### Description
+## MrT0t0 - https://github.com/Mrt0t0/NewGreedy/
 
-NewGreedy v0.7 is a HTTP proxy for BitTorrent clients. (GreedyTorrent Like).
+NewGreedy is a HTTP proxy for BitTorrent clients (GreedyTorrent-like).
 
-It intercepts tracker "announce" requests and intelligently modifies the `uploaded` statistic. This version uses a **progressive multiplier** that starts at 1.0 and linearly increases to a configurable maximum over a set duration.
+It intercepts tracker "announce" requests and intelligently modifies the `uploaded` statistic.
+This version uses advanced, configurable logic to simulate realistic upload behavior and avoid detection.
 
-This version introduces **dual logging**: all activity is logged simultaneously to the console for real-time monitoring and to a file for persistent records.
-
-The reported upload is calculated as: `Reported Upload = Real Downloaded * Progressive Multiplier`.
+The reported upload is calculated using a dynamic multiplier, with several safety features built-in.
 
 ### Features
-
--   **Progressive Multiplier**: Simulates realistic upload behavior over time.
--   **Download-Based Calculation**: Ensures a steady increase in reported ratio.
--   **Dual Logging**: Logs activity to both the console and a file.
--   **Log Rotation**: Automatically deletes old log files to save space.
--   **Safe Parameter Handling**: Prevents corruption of critical tracker parameters.
--   **Multi-Threaded**: Handles multiple simultaneous client connections.
-
-### Dependencies
-
--   Python 3.x
--   `requests` library (`pip install requests`)
-
-### Configuration (`config.ini`)
-
--   `listen_port`: The local port the proxy listens on.
--   `max_upload_multiplier`: The target multiplier to be reached.
--   `ramp_up_seconds`: The duration for the multiplier to increase to its max.
--   `log_file`: The path for the persistent log file.
--   `log_retention_days`: How long to keep the log file before deleting it.
-
-### Installation & Usage
-
-1.  **Clone the repository:**
-    ```
-    git clone https://github.com/Mrt0t0/NewGreedy.git
-    cd NewGreedy
-    ```
-
-2.  **Customize `config.ini`** to set your preferences.
-
-3.  **Run the installation script:**
-    ```
-    chmod +x install.sh
-    sudo ./install.sh
-    ```
-
-4.  **Monitor the service:**
-    -   **Live Console & File Logs:** Logs are now visible in `journalctl` and saved to the path specified by `log_file`.
-    -   `sudo systemctl status newgreedy.service`
-    -   `journalctl -u newgreedy.service -f`
+-   **Automatic Update Checker**: Checks for new versions on GitHub on startup and notifies the user in the logs.
+-   **Global Ratio Limiter**: Automatically disables the upload multiplier if the overall ratio exceeds a safe, user-defined limit.
+-   **Randomized Multiplier**: Adds a random variation to the multiplier, making upload patterns appear more natural and less robotic.
+-   **Simulated Upload Speed Cap**: Prevents unrealistic upload speed spikes by capping the reported upload rate to a configurable maximum.
+-   **Maximum Tracker Compatibility**: Uses a direct string replacement method to preserve the original URL structure and prevent tracker errors.
+-   **Dual Logging**: Logs all activity to both the console and a persistent file for easy monitoring.
+-   **Multi-Threaded**: Handles multiple simultaneous client connections without blocking.
 """
 
 import http.server
@@ -65,131 +29,166 @@ import logging
 import os
 import time
 import re
-from threading import Thread
+import random
+import threading
 
-# --- Global Start Time ---
-SCRIPT_START_TIME = time.time()
-
-# --- Configuration Loading ---
+# --- Global State & Configuration ---
+CURRENT_VERSION = "0.8"
 config = configparser.ConfigParser()
 config.read('config.ini')
 
+# Proxy settings
 LISTEN_PORT = int(config['DEFAULT'].get('listen_port', 3456))
-MAX_UPLOAD_MULTIPLIER = float(config['DEFAULT'].get('max_upload_multiplier', 5.0))
-RAMP_UP_SECONDS = int(config['DEFAULT'].get('ramp_up_seconds', 3600))
+MAX_MULTIPLIER = float(config['DEFAULT'].get('max_upload_multiplier', 1.6))
+RANDOM_FACTOR = float(config['DEFAULT'].get('randomization_factor', 0.1))
+MAX_SPEED_MBPS = float(config['DEFAULT'].get('max_simulated_speed_mbps', 11.0))
+MAX_SPEED_BPS = MAX_SPEED_MBPS * 1024 * 1024 / 8
+GLOBAL_RATIO_LIMIT = float(config['DEFAULT'].get('global_ratio_limit', 1.8))
+
+# Logging settings
 LOG_FILE = config['LOGGING'].get('log_file', 'newgreedy.log')
-LOG_RETENTION_DAYS = int(config['LOGGING'].get('log_retention_days', 7))
 
-# --- Dual Logging Setup ---
-# Configure logging to output to both a file and the console.
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S',
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler()
-    ]
-)
+# --- Logging Setup ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] - %(message)s',
+                    handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()])
 
-def get_progressive_multiplier(max_multiplier, ramp_up_duration):
-    """Calculates a multiplier that increases linearly over time."""
-    elapsed_time = time.time() - SCRIPT_START_TIME
-    if elapsed_time >= ramp_up_duration:
-        return max_multiplier
-    else:
-        return 1.0 + (max_multiplier - 1.0) * (elapsed_time / ramp_up_duration)
+# --- Function Definitions ---
+def check_for_updates():
+    """Checks for new releases on the GitHub repository."""
+    api_url = "https://api.github.com/repos/Mrt0t0/NewGreedy/releases/latest"
+    try:
+        response = requests.get(api_url, timeout=10)
+        if response.status_code == 404:
+            logging.info("Update check skipped: No releases found.")
+            return
+        response.raise_for_status()
+        latest_version = response.json().get("tag_name", "").replace('v', '')
+        if latest_version and float(latest_version) > float(CURRENT_VERSION):
+            logging.info(f"A new version is available: v{latest_version}")
+        else:
+            logging.info("NewGreedy is up to date.")
+    except Exception as e:
+        logging.error(f"Could not check for updates: {e}")
 
-def cleanup_old_logs(logfile_path, retention_days):
-    """Deletes the log file if it's older than the retention period."""
-    if os.path.exists(logfile_path):
-        file_age_seconds = time.time() - os.path.getmtime(logfile_path)
-        if file_age_seconds > (retention_days * 86400):
-            try:
-                os.remove(logfile_path)
-                logging.info(f"Old log file '{logfile_path}' deleted.")
-            except OSError as e:
-                logging.error(f"Error deleting log file: {e}")
+class StatsManager:
+    """A thread-safe class to manage torrent statistics."""
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.torrents = {}
 
-def log_cleanup_worker():
-    """Background thread that runs log cleanup once a day."""
-    while True:
-        cleanup_old_logs(LOG_FILE, LOG_RETENTION_DAYS)
-        time.sleep(86400)
+    def update(self, info_hash, downloaded, uploaded_real, uploaded_reported):
+        with self.lock:
+            if info_hash not in self.torrents:
+                self.torrents[info_hash] = {'downloaded': 0, 'uploaded_real': 0, 'last_update': time.time()}
 
+            self.torrents[info_hash].update({
+                'downloaded': downloaded,
+                'uploaded_real': uploaded_real,
+                'uploaded_reported': uploaded_reported,
+                'last_update': time.time()
+            })
+
+    def get_stats(self):
+        with self.lock: return dict(self.torrents)
+    def get_total_downloaded(self):
+        with self.lock: return sum(s['downloaded'] for s in self.torrents.values())
+    def get_total_reported_upload(self):
+        with self.lock: return sum(s['uploaded_reported'] for s in self.torrents.values())
+    def get_global_ratio(self):
+        dl = self.get_total_downloaded(); ul = self.get_total_reported_upload()
+        return ul / dl if dl > 0 else 0
+
+stats_manager = StatsManager()
+
+# --- Core Proxy Logic with Correct Logging ---
 class NewGreedyProxyHandler(http.server.BaseHTTPRequestHandler):
-    """HTTP proxy handler with progressive multiplier and dual logging."""
     def do_GET(self):
         try:
-            full_url = self.path
-            logging.info(f"Intercepted GET: {full_url[:120]}...")
+            original_url = self.path
 
-            parsed_url = urllib.parse.urlsplit(full_url)
-            query_string = parsed_url.query
-            new_query_string = query_string
+            uploaded_match = re.search(r'uploaded=(\d+)', original_url)
+            downloaded_match = re.search(r'downloaded=(\d+)', original_url)
+            info_hash_match = re.search(r'info_hash=([^&]+)', original_url)
 
-            downloaded_match = re.search(r'downloaded=(\d+)', query_string)
-            uploaded_match = re.search(r'uploaded=(\d+)', query_string)
+            if not (uploaded_match and downloaded_match and info_hash_match):
+                self.forward_request(original_url); return
 
-            if downloaded_match and uploaded_match:
-                real_downloaded_bytes = int(downloaded_match.group(1))
-                multiplier = get_progressive_multiplier(MAX_UPLOAD_MULTIPLIER, RAMP_UP_SECONDS)
-                new_uploaded_bytes = int(real_downloaded_bytes * multiplier)
+            info_hash = urllib.parse.unquote(info_hash_match.group(1))
+            real_downloaded = int(downloaded_match.group(1))
+            real_uploaded = int(uploaded_match.group(1))
+            real_uploaded_str = uploaded_match.group(0)
 
-                original_uploaded_str = uploaded_match.group(0)
-                new_uploaded_str = f'uploaded={new_uploaded_bytes}'
+            multiplier = MAX_MULTIPLIER * (1 + random.uniform(-RANDOM_FACTOR, RANDOM_FACTOR))
+            if stats_manager.get_global_ratio() > GLOBAL_RATIO_LIMIT:
+                multiplier = 1.0
 
-                new_query_string = query_string.replace(original_uploaded_str, new_uploaded_str)
+            reported_upload = int(real_downloaded * multiplier)
 
-                logging.info(
-                    f"Multiplier: {multiplier:.3f} | "
-                    f"Downloaded: {real_downloaded_bytes / (1024*1024):.2f} MB | "
-                    f"Reported Upload: {new_uploaded_bytes / (1024*1024):.2f} MB"
-                )
+            last_stats = stats_manager.get_stats().get(info_hash, {})
+            time_delta = time.time() - last_stats.get('last_update', time.time())
+            if time_delta > 0:
+                max_upload_chunk = MAX_SPEED_BPS * time_delta
+                capped_upload = last_stats.get('uploaded_reported', 0) + int(max_upload_chunk)
+                if reported_upload > capped_upload:
+                    reported_upload = capped_upload
 
-            target_path_and_query = parsed_url.path + ('?' + new_query_string if new_query_string else '')
+            stats_manager.update(info_hash, real_downloaded, real_uploaded, reported_upload)
 
-            forward_headers = dict(self.headers)
-            forward_headers['Host'] = parsed_url.netloc
+            logging.info(
+                f"Torrent {info_hash[:10]}... | "
+                f"DL: {real_downloaded / (1024*1024):.2f} MB | "
+                f"Real UL: {real_uploaded / (1024*1024):.2f} MB | "
+                f"Reported UL: {reported_upload / (1024*1024):.2f} MB"
+            )
 
-            with requests.Session() as session:
-                session.headers.update(forward_headers)
-                target_url = f"http://{parsed_url.netloc}{target_path_and_query}"
-
-                response = session.get(target_url, stream=True, timeout=15)
-
-            self.send_response(response.status_code)
-            for key, value in response.headers.items():
-                if key.lower() != 'transfer-encoding':
-                    self.send_header(key, value)
-            self.end_headers()
-
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
-                    self.wfile.write(chunk)
+            new_url = original_url.replace(real_uploaded_str, f'uploaded={reported_upload}')
+            self.forward_request(new_url)
 
         except Exception as e:
-            logging.error(f"An unexpected error occurred: {e}")
-            if not self.wfile.closed:
-                self.send_error(500, "Internal Server Error")
+            logging.error(f"Proxy handler error: {e}"); self.send_error(500)
+
+    def forward_request(self, url):
+        headers = dict(self.headers)
+        headers['Host'] = urllib.parse.urlsplit(url).netloc
+        try:
+            with requests.get(url, headers=headers, timeout=15) as response:
+                self.send_response(response.status_code)
+                for k, v in response.headers.items():
+                    if k.lower() not in ['transfer-encoding', 'content-length', 'connection']:
+                        self.send_header(k, v)
+                self.end_headers()
+                self.wfile.write(response.content)
+        except Exception as e:
+            logging.error(f"Forwarding request failed: {e}")
+            if not self.wfile.closed: self.send_error(502)
 
     def log_message(self, format, *args):
-        # Suppress default server logging to avoid duplicate messages.
         return
 
-def run_proxy_server():
-    """Sets up and runs the threaded HTTP proxy server."""
-    # Start the log cleanup worker in a separate thread.
-    cleanup_thread = Thread(target=log_cleanup_worker, daemon=True)
-    cleanup_thread.start()
-
-    with socketserver.ThreadingTCPServer(("", LISTEN_PORT), NewGreedyProxyHandler) as httpd:
-        print("--- NewGreedy v0.7 (Dual Logging) ---")
-        print(f"Listening on port: {LISTEN_PORT}")
-        print(f"Max Upload Multiplier: x{MAX_UPLOAD_MULTIPLIER}")
-        print(f"Logs are being written to console and to '{LOG_FILE}'")
-        logging.info("Server startup complete.")
-        httpd.serve_forever()
-
+# --- Main Execution for Service Stability ---
 if __name__ == '__main__':
-    run_proxy_server()
+    logging.info(f"--- Starting NewGreedy v{CURRENT_VERSION} // Mrt0t0---")
+
+    update_thread = threading.Thread(target=check_for_updates, daemon=True)
+    update_thread.start()
+
+    logging.info(f"Proxy listening on port {LISTEN_PORT}")
+    logging.info(f"Max Multiplier: {MAX_MULTIPLIER}x, Random Factor: +/-{RANDOM_FACTOR*100}%")
+    logging.info(f"Max Simulated Speed: {MAX_SPEED_MBPS} Mbps, Global Ratio Limit: {GLOBAL_RATIO_LIMIT}")
+
+    server = socketserver.ThreadingTCPServer(("", LISTEN_PORT), NewGreedyProxyHandler)
+    server_thread = threading.Thread(target=server.serve_forever)
+    server_thread.daemon = True
+    server_thread.start()
+
+    logging.info("NewGreedy Proxy server is running in the background.")
+
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        logging.info("Shutting down...")
+        server.shutdown()
+        server.server_close()
+
+    logging.info("--- NewGreedy Proxy Shut Down ---")
