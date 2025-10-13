@@ -70,7 +70,8 @@ Version 0.9 integrates advanced behavior to simulate realistic usage and avoid t
     -   Check log file
   
 5. **Update from Github**
-   To update your local NewGreedy installation with the latest changes from GitHub, follow these steps:
+   
+   -    To update your local NewGreedy installation with the latest changes from GitHub, follow these steps:
 
    -    Open a terminal.
    -    Navigate to your NewGreedy installation directory: `cd ~/NewGreedy`
