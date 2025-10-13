@@ -52,8 +52,7 @@ Version 0.9 integrates advanced behavior to simulate realistic usage and avoid t
 1.  **Clone the repository:**
     ```
     git clone https://github.com/Mrt0t0/NewGreedy.git
-    defaut dir : "/opt/newgreedy"
-    cd newgreedy
+    cd ./NewGreedy
     ```
 
 2.  **Customize `config.ini`** to set your preferences.
@@ -62,6 +61,8 @@ Version 0.9 integrates advanced behavior to simulate realistic usage and avoid t
     ```
     chmod +x install.sh
     sudo ./install.sh
+
+    defaut install dir : "./opt/newgreedy"
     ```
 
 4.  **Monitor the service:**
@@ -75,7 +76,7 @@ Version 0.9 integrates advanced behavior to simulate realistic usage and avoid t
    -    To update your local NewGreedy installation with the latest changes from GitHub, follow these steps:
 
    -    Open a terminal.
-   -    Navigate to your NewGreedy installation directory: `cd ~/newgreedy`
+   -    Navigate to your NewGreedy installation directory: `cd ./opt/newgreedy`
    -    Pull the latest changes from the GitHub repository: `git pull origin main`
    -    (Optional) Update Python dependencies, in case requirements changed: `python3 -m pip install --upgrade requests`
    -    Restart the NewGreedy service to apply the update: `sudo systemctl restart newgreedy.service`
