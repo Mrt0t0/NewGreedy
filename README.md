@@ -1,16 +1,14 @@
 # NewGreedy v0.9 - Advanced CLI HTTP proxy for BitTorrent clients
 Mrt0t0 / [https://github.com/Mrt0t0/NewGreedy](https://github.com/Mrt0t0/NewGreedy)
 
+Cross-Platform Support (Windows/Mac/Linux)
+
 ### Description
 
-NewGreedy is an HTTP proxy for BitTorrent clients (GreedyTorrent-like). It intercepts tracker "announce" requests and modifies the `uploaded` statistic intelligently.
+NewGreedy is an HTTP proxy for BitTorrent clients (GreedyTorrent like). It intercepts tracker "announce" requests and modifies the `uploaded` statistic intelligently.
 
-Version 0.9 integrates advanced behavior to simulate realistic usage and avoid tracker detection by:
-
-- Detecting completed torrents and applying a smaller upload multiplier during seeding.
-- Enforcing a cooldown period after reaching a global upload/download ratio limit to simulate user slowdown.
-- Logging human-readable torrent hostnames or peer IP addresses for easier monitoring.
-- Performing automatic updates checks against GitHub releases.
+Version 0.9 integrates advanced behavior to simulate realistic usage and avoid tracker detection.
+Use it with a torrent client (qbittorent for exemple).
 
 ### Features
 
@@ -57,7 +55,7 @@ Version 0.9 integrates advanced behavior to simulate realistic usage and avoid t
 
 2.  **Customize `config.ini`** to set your preferences.
 
-3.  **Run the installation script** to set up the systemd service:
+3.  **Run the installation script (Linux)** to set up the systemd service:
     ```
     chmod +x install.sh
     sudo ./install.sh
@@ -71,7 +69,11 @@ Version 0.9 integrates advanced behavior to simulate realistic usage and avoid t
     -   View live logs: `journalctl -u newgreedy.service -f`
     -   Check log file
   
-5. **Update from Github**
+5.  **Configure you bittorent client**
+    Tools → Options → Connection → Proxy Server: HTTP Proxy
+    Add any torrent → Check NewGreedy logs:
+  
+6.  **Update from Github**
    
    -    To update your local NewGreedy installation with the latest changes from GitHub, follow these steps:
 
