@@ -25,7 +25,43 @@ to simulate realistic upload ratios while avoiding tracker detection.
 HTTPS support (server-side and tracker-side), automatic self-signed certificate
 generation.
 
-Use it with any torrent client that supports an HTTP proxy (e.g. qBittorrent).
+Use it with any torrent client that supports an HTTP/HTTPS proxy (e.g. qBittorrent).
+
+---
+## Architecture
+
+NewGreedy offers two operating modes depending on whether your trackers use HTTP or HTTPS:
+
+```
+MODE 1 — Standard (newgreedy.py)
+─────────────────────────────────────────────────────────────────
+qBittorrent ──HTTP──► newgreedy.py:3456 ──HTTP──► tracker        ✅ uploaded modified
+qBittorrent ──HTTP──► newgreedy.py:3456 ──HTTPS──► tracker       ✅ uploaded modified
+qBittorrent ──HTTP──► newgreedy.py:3456 ══CONNECT══► tracker     ⚠️  tunnel only, NOT modified
+
+MODE 2 — mitmproxy (newgreedy_addon.py)
+─────────────────────────────────────────────────────────────────
+qBittorrent ──HTTP──► mitmdump:3456 ──HTTP──► tracker            ✅ uploaded modified
+qBittorrent ──HTTP──► mitmdump:3456 ──HTTPS──► tracker           ✅ uploaded modified (SSL inspection)
+```
+
+| Situation | Recommended mode |
+|---|---|
+| Trackers use `http://` | Standard (`newgreedy.py`) |
+| Trackers use `https://` | mitmproxy (`newgreedy_addon.py`) |
+| Mixed HTTP + HTTPS | mitmproxy (`newgreedy_addon.py`) |
+
+---
+
+## Files
+
+| File | Description |
+|---|---|
+| `newgreedy.py` | Standalone HTTP proxy — standard mode |
+| `newgreedy_addon.py` | mitmproxy addon — full HTTP+HTTPS interception |
+| `config.ini` | Shared configuration for both modes |
+| `install.sh` | Automated installer — supports both modes |
+| `README.md` | This file |
 
 ---
 
@@ -33,189 +69,135 @@ Use it with any torrent client that supports an HTTP proxy (e.g. qBittorrent).
 
 | Feature | Description |
 |---|---|
-| **Intelligent Seeding** | Detects torrent completion (`left=0`) and switches to a lighter, configurable seeding multiplier |
-| **Cooldown Mode** | Temporarily reports real upload values after the global ratio limit is reached |
-| **Randomized Multiplier** | Adds realistic variance to reported upload values to break statistical patterns |
-| **Upload Speed Cap** | Restricts the maximum reported upload speed to avoid unrealistic spikes |
-| **Global Ratio Limiter** | Prevents suspiciously high ratios that could trigger tracker detection |
-| **HTTPS Server** | Proxy can listen over HTTPS with TLS 1.2+ enforcement |
-| **HTTPS Tracker Support** | Forwards requests to HTTPS trackers with configurable SSL verification |
-| **Auto Certificate** | Generates a self-signed certificate automatically if none is found |
-| **Dual Logging** | Logs activity concurrently to console and file |
-| **Multi-threaded** | Handles multiple simultaneous client requests efficiently |
-| **Auto Update Check** | Notifies users of new GitHub releases at startup |
+| **Intelligent Seeding** | Detects torrent completion (`left=0`), applies lighter seeding multiplier |
+| **Cooldown Mode** | Reports real upload after global ratio limit is reached |
+| **Randomized Multiplier** | Adds ±variance to reported values — breaks statistical patterns |
+| **Upload Speed Cap** | Prevents unrealistic upload spikes between announces |
+| **Global Ratio Limiter** | Prevents suspiciously high ratios |
+| **HTTPS Tracker Support** | Both modes support HTTPS tracker forwarding |
+| **Full SSL Inspection** | mitmproxy mode intercepts and modifies HTTPS announces |
+| **Auto Certificate** | Generates self-signed cert automatically if missing |
+| **Dual Logging** | Console + file logging |
+| **Multi-threaded** | Handles concurrent clients |
+| **Auto Update Check** | Notifies of new GitHub releases at startup |
 
 ---
 
-## Dependencies
+## Requirements
 
 - Python 3.8+
-- `requests` library
-- `openssl` (optional — required for automatic self-signed certificate generation)
-
-```bash
-pip install requests
-```
+- `requests` (`pip install requests`)
+- `openssl` — optional, for auto self-signed certificate generation (apt install openssl)
+- `mitmproxy` — optional, required for mitmproxy mode (`pip install mitmproxy`)
 
 ---
 
-## Configuration (`config.ini`)
+## Quick Start
 
-| Key | Default | Description |
-|---|---|---|
-| `listen_port` | `3456` | Local port the proxy listens on |
-| `max_upload_multiplier` | `1.6` | Multiplier applied to reported upload while downloading |
-| `seeding_multiplier` | `1.2` | Multiplier applied when the torrent is complete (`left=0`) |
-| `randomization_factor` | `0.25` | Random variance on the multiplier (e.g. `0.25` = ±25%) |
-| `max_simulated_speed_mbps` | `7.6` | Maximum simulated upload speed in Mbps |
-| `global_ratio_limit` | `1.8` | Global ratio threshold before entering cooldown |
-| `cooldown_duration_minutes` | `10` | Duration of the cooldown period in minutes |
-| `enable_https` | `false` | Enable HTTPS on the proxy listener |
-| `ssl_certfile` | `cert.pem` | Path to the SSL certificate |
-| `ssl_keyfile` | `key.pem` | Path to the SSL private key |
-| `ssl_autogenerate_cert` | `true` | Auto-generate a self-signed cert if missing (dev only) |
-| `ssl_verify_trackers` | `true` | Verify SSL certificates of remote trackers |
-| `log_file` | `newgreedy.log` | Path to the persistent log file |
-
----
-
-## Installation & Usage
-
-### 1. Clone the repository
+### Standard mode (HTTP trackers)
 
 ```bash
-cd /tmp
+cd ./tmp
 git clone https://github.com/Mrt0t0/NewGreedy.git
 cd NewGreedy
-```
-
-### 2. Install dependencies
-
-```bash
 pip install requests
-```
-
-### 3. Customize `config.ini`
-
-Edit `config.ini` to match your preferences before running.
-See the configuration table above for all available options.
-
-### 4. Run the installation script (Linux)
-
-Sets up the proxy as a systemd service running under a dedicated `newgreedy` user:
-
-```bash
 chmod +x install.sh
 sudo ./install.sh
 ```
 
-Default installation directory: `/opt/newgreedy`
+### mitmproxy mode (HTTPS trackers)
 
-### 5. Configure your BitTorrent client
+```bash
+cd ./tmp
+git clone https://github.com/Mrt0t0/NewGreedy.git
+cd NewGreedy
+pip install requests mitmproxy
+chmod +x install.sh
+sudo ./install.sh --mitmproxy
+```
 
-In qBittorrent (or any compatible client):
+---
+
+## Configure qBittorrent
 
 ```
 Tools → Options → Connection → Proxy Server
 Type  : HTTP
 Host  : 127.0.0.1
-Port  : 3456  (or your configured listen_port)
+Port  : 3456
 ```
 
-Add any torrent and check the NewGreedy logs to verify interception.
+> ✅ Enable  : "Use proxy for tracker connections"
+> ❌ Disable : "Use proxy for peer connections"
 
-### 6. Monitor the service
+---
+
+## HTTPS Setup (mitmproxy mode only)
+
+mitmproxy performs SSL inspection — qBittorrent must trust its CA certificate:
 
 ```bash
-# Check service status
-sudo systemctl status newgreedy.service
+# Step 1 — Generate the mitmproxy CA (run once, then stop with Ctrl+C)
+mitmdump -p 3456 --ssl-insecure -s /opt/newgreedy/newgreedy_addon.py
 
-# Follow live logs
-sudo journalctl -u newgreedy.service -f
+# Step 2 — Install the CA system-wide
+cp ~/.mitmproxy/mitmproxy-ca-cert.pem /usr/local/share/ca-certificates/mitmproxy.crt
+update-ca-certificates
 
-# Check the log file directly
+# Step 3 — Restart the service
+systemctl restart newgreedy.service
+```
+
+---
+
+## Configuration Reference
+
+| Key | Default | Description |
+|---|---|---|
+| `listen_port` | `3456` | Local port the proxy listens on |
+| `max_upload_multiplier` | `1.6` | Multiplier while downloading |
+| `seeding_multiplier` | `1.2` | Multiplier while seeding |
+| `randomization_factor` | `0.25` | Random variance ±% on multiplier |
+| `max_simulated_speed_mbps` | `7.6` | Max simulated upload speed in Mbps |
+| `global_ratio_limit` | `1.8` | Ratio threshold before cooldown |
+| `cooldown_duration_minutes` | `10` | Cooldown duration in minutes |
+| `tracker_timeout` | `5` | Tracker request timeout in seconds |
+| `enable_https` | `false` | Enable HTTPS on proxy listener (standard mode) |
+| `ssl_certfile` | `cert.pem` | SSL certificate path |
+| `ssl_keyfile` | `key.pem` | SSL private key path |
+| `ssl_autogenerate_cert` | `true` | Auto-generate cert if missing |
+| `ssl_verify_trackers` | `true` | Verify SSL on remote trackers |
+| `log_file` | `newgreedy.log` | Log file path |
+
+---
+
+## Monitoring
+
+```bash
+# Live log
 tail -f /opt/newgreedy/newgreedy.log
+
+# Service status
+systemctl status newgreedy.service
+
+# Count intercepted announces
+grep -c "DOWNLOADING\|SEEDING\|COOLDOWN" /opt/newgreedy/newgreedy.log
+
+# Check for errors
+grep "ERROR\|WARNING" /opt/newgreedy/newgreedy.log | tail -20
+```
+
+Expected log output:
+```
+[DOWNLOADING] tracker.example.com | DL: 12.45 MB | Real UL: 0.00 MB | Reported UL: 19.92 MB | Protocol: HTTPS
+[SEEDING]     tracker.example.com | DL: 512.00 MB | Real UL: 1.20 MB | Reported UL: 614.40 MB | Protocol: HTTPS
+[COOLDOWN]    tracker.example.com | DL: 800.00 MB | Real UL: 5.00 MB | Reported UL: 5.00 MB | Protocol: HTTPS
 ```
 
 ---
 
-## HTTPS Setup
-
-### Option A — Self-signed certificate (dev / local use)
-
-Set in `config.ini`:
-```ini
-enable_https = true
-ssl_autogenerate_cert = true
-```
-
-On first launch, NewGreedy calls `openssl` automatically to generate `cert.pem` and `key.pem`.
-
-> ⚠️ Self-signed certificates are for local/development use only.
-> Your BitTorrent client may require you to add a certificate exception.
-
-### Option B — Let's Encrypt (production)
+## Update
 
 ```bash
-sudo certbot certonly --standalone -d your-domain.com
+cd /opt/newgreedy && git pull origin main && systemctl restart newgreedy.service
 ```
-
-Then in `config.ini`:
-```ini
-enable_https       = true
-ssl_certfile       = /etc/letsencrypt/live/your-domain.com/fullchain.pem
-ssl_keyfile        = /etc/letsencrypt/live/your-domain.com/privkey.pem
-ssl_autogenerate_cert = false
-```
-
-Auto-renewal:
-```bash
-# Test renewal
-sudo certbot renew --dry-run
-
-# Cron job (runs twice daily)
-0 0,12 * * * /usr/bin/certbot renew --quiet
-```
-
----
-
-## Updating from GitHub
-
-To update your local installation with the latest changes:
-
-```bash
-# 1. Navigate to the installation directory
-cd /opt/newgreedy
-
-# 2. Pull the latest changes
-git pull origin main
-
-# 3. Update Python dependencies if needed
-python3 -m pip install --upgrade requests
-
-# 4. Restart the service
-sudo systemctl restart newgreedy.service
-
-# 5. Verify the update
-sudo systemctl status newgreedy.service
-journalctl -u newgreedy.service -f
-```
-
-> Your `config.ini` is never overwritten by `git pull`.
-> After a major update, compare your config with `config.ini.new` if present.
-
----
-
-## Changelog
-
-### v1.0
-- Full HTTPS support — proxy listener and tracker forwarding
-- Automatic self-signed certificate generation via `openssl`
-- TLS 1.2 minimum enforced on all SSL connections
-- Dedicated `newgreedy` system user in `install.sh` (no longer runs as root)
-- `allow_reuse_address` on server socket — no more restart errors
-- Pre-compiled regex patterns for improved request handling performance
-- `time.monotonic()` replaces `time.time()` for reliable time deltas
-- Thread-safe cooldown state with dedicated lock
-- Graceful startup failure with clear log message if HTTPS cert is missing
-- Detailed SSL error reporting with actionable guidance
