@@ -103,6 +103,7 @@ cd NewGreedy
 pip install requests
 chmod +x install.sh
 sudo ./install.sh
+In qBittorrent: Tools → Options → Connection → Proxy → HTTP / 127.0.0.1 / 3456
 ```
 
 ### mitmproxy mode (HTTPS trackers)
@@ -114,6 +115,8 @@ cd NewGreedy
 pip install requests mitmproxy
 chmod +x install.sh
 sudo ./install.sh --mitmproxy
+Install CA : cp ~/.mitmproxy/mitmproxy-ca-cert.pem /usr/local/share/ca-certificates/mitmproxy.crt && update-ca-certificates
+In qBittorrent: Tools → Options → Connection → Proxy → HTTP / 127.0.0.1 / 3456
 ```
 
 ---
