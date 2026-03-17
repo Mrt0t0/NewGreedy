@@ -84,6 +84,7 @@ pip install requests
 ### 1. Clone the repository
 
 ```bash
+cd /tmp
 git clone https://github.com/Mrt0t0/NewGreedy.git
 cd NewGreedy
 ```
