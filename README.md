@@ -97,7 +97,7 @@ qBittorrent ──HTTP──► mitmdump:3456 ──HTTPS──► tracker      
 ### Standard mode (HTTP trackers)
 
 ```bash
-cd ./tmp
+cd /tmp
 git clone https://github.com/Mrt0t0/NewGreedy.git
 cd NewGreedy
 pip install requests
@@ -108,7 +108,7 @@ sudo ./install.sh
 ### mitmproxy mode (HTTPS trackers)
 
 ```bash
-cd ./tmp
+cd /tmp
 git clone https://github.com/Mrt0t0/NewGreedy.git
 cd NewGreedy
 pip install requests mitmproxy
