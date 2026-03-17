@@ -1,15 +1,11 @@
 # NewGreedy v1.0 — mitmproxy addon
 # MrT0t0 - https://github.com/Mrt0t0/NewGreedy/
 #
-# Full HTTPS announce interception via mitmproxy SSL inspection.
-# Use this instead of newgreedy.py when your trackers are HTTPS-only.
+# Full HTTP+HTTPS announce interception via mitmproxy SSL inspection.
+# Use when trackers are HTTPS-only.
 #
-# Usage:
-#   mitmdump -p 3456 --ssl-insecure -s newgreedy_addon.py
-#
-# Requirements:
-#   pip install mitmproxy
-#   Install mitmproxy CA certificate in qBittorrent (see README — HTTPS Setup)
+# Launch: mitmdump -p 3456 --ssl-insecure -s newgreedy_addon.py
+# Install: sudo ./install.sh --mitmproxy
 
 import re
 import time
@@ -21,7 +17,6 @@ import socket
 import urllib.parse
 import requests
 from mitmproxy import http
-from pathlib import Path
 
 CURRENT_VERSION = "1.0"
 
@@ -53,7 +48,6 @@ _cooldown_lock    = threading.Lock()
 # ── Network helpers ────────────────────────────────────────────────────────────
 
 def resolve_host(ip: str) -> str:
-    """Attempt a reverse DNS lookup. Returns IP on failure."""
     try:
         return socket.gethostbyaddr(ip)[0]
     except OSError:
@@ -62,15 +56,16 @@ def resolve_host(ip: str) -> str:
 # ── GitHub update check ────────────────────────────────────────────────────────
 
 def check_for_updates():
-    """Query the GitHub Releases API and log a notice if a newer version exists."""
-    api_url = "https://api.github.com/repos/Mrt0t0/NewGreedy/releases/latest"
     try:
-        response = requests.get(api_url, timeout=10)
-        if response.status_code == 404:
-            logging.info("Update check: no releases found on GitHub.")
+        r = requests.get(
+            "https://api.github.com/repos/Mrt0t0/NewGreedy/releases/latest",
+            timeout=10
+        )
+        if r.status_code == 404:
+            logging.info("Update check: no releases found.")
             return
-        response.raise_for_status()
-        latest = response.json().get("tag_name", "").lstrip("v")
+        r.raise_for_status()
+        latest = r.json().get("tag_name", "").lstrip("v")
         if latest and float(latest) > float(CURRENT_VERSION):
             logging.info(f"New version available: v{latest} — https://github.com/Mrt0t0/NewGreedy/releases")
         else:
@@ -81,16 +76,13 @@ def check_for_updates():
 # ── Stats manager ──────────────────────────────────────────────────────────────
 
 class StatsManager:
-    """
-    Thread-safe in-memory store for per-torrent transfer statistics.
-    Used to compute the global ratio and enforce the upload speed cap.
-    """
+    """Thread-safe per-torrent stats store for ratio and speed cap computation."""
+
     def __init__(self):
         self._lock     = threading.Lock()
         self._torrents = {}
 
-    def update(self, info_hash: str, downloaded: int, uploaded_real: int, uploaded_reported: int):
-        """Insert or overwrite the stats entry for a given info_hash."""
+    def update(self, info_hash, downloaded, uploaded_real, uploaded_reported):
         with self._lock:
             self._torrents[info_hash] = {
                 'downloaded':        downloaded,
@@ -99,22 +91,63 @@ class StatsManager:
                 'last_update':       time.monotonic(),
             }
 
-    def get(self, info_hash: str) -> dict:
-        """Return a snapshot of the stats entry for info_hash, or {} if unknown."""
+    def get(self, info_hash):
         with self._lock:
             return dict(self._torrents.get(info_hash, {}))
 
-    def global_ratio(self) -> float:
-        """
-        Compute the overall upload/download ratio across all tracked torrents.
-        Returns 0.0 when no data has been downloaded yet (avoids division by zero).
-        """
+    def global_ratio(self):
         with self._lock:
-            total_dl = sum(t['downloaded']        for t in self._torrents.values())
-            total_ul = sum(t['uploaded_reported'] for t in self._torrents.values())
-        return total_ul / total_dl if total_dl > 0 else 0.0
+            dl = sum(t['downloaded']        for t in self._torrents.values())
+            ul = sum(t['uploaded_reported'] for t in self._torrents.values())
+        return ul / dl if dl > 0 else 0.0
 
 stats_manager = StatsManager()
+
+# ── Core multiplier logic (shared with newgreedy.py) ──────────────────────────
+
+def compute_reported_upload(info_hash, real_dl, real_ul, left):
+    """
+    Compute the reported upload value applying multiplier, randomization,
+    speed cap, and cooldown. Returns (reported_upload, mode_label).
+    """
+    global is_in_cooldown, cooldown_end_time
+
+    now = time.monotonic()
+
+    with _cooldown_lock:
+        if is_in_cooldown and now > cooldown_end_time:
+            is_in_cooldown = False
+            logging.info("Cooldown ended. Resuming normal multiplier.")
+
+        if is_in_cooldown:
+            multiplier, mode = 1.0, "COOLDOWN"
+        elif left == 0:
+            multiplier, mode = SEEDING_MULTIPLIER, "SEEDING"
+        else:
+            multiplier, mode = MAX_MULTIPLIER, "DOWNLOADING"
+
+        multiplier *= 1 + random.uniform(-RANDOM_FACTOR, RANDOM_FACTOR)
+
+        if not is_in_cooldown and stats_manager.global_ratio() > GLOBAL_RATIO_LIMIT:
+            is_in_cooldown    = True
+            cooldown_end_time = now + COOLDOWN_MINUTES * 60
+            multiplier, mode  = 1.0, "COOLDOWN"
+            logging.warning(
+                f"Global ratio limit reached ({GLOBAL_RATIO_LIMIT}). "
+                f"Cooldown for {COOLDOWN_MINUTES} minutes."
+            )
+
+    reported_ul = int(real_dl * multiplier)
+
+    prev = stats_manager.get(info_hash)
+    if prev:
+        delta = now - prev.get('last_update', now)
+        if delta > 0:
+            cap         = prev.get('uploaded_reported', 0) + int(MAX_SPEED_BPS * delta)
+            reported_ul = min(reported_ul, cap)
+
+    stats_manager.update(info_hash, real_dl, real_ul, reported_ul)
+    return reported_ul, mode
 
 # ── mitmproxy Addon ────────────────────────────────────────────────────────────
 
@@ -122,10 +155,7 @@ class NewGreedyAddon:
     """
     mitmproxy addon intercepting BitTorrent tracker announce requests
     over both HTTP and HTTPS via SSL inspection.
-
-    The 'uploaded' query parameter is rewritten according to configured
-    multipliers before the request reaches the tracker.
-    All non-announce requests are forwarded transparently.
+    Rewrites the 'uploaded' query parameter before the request reaches the tracker.
     """
 
     _RE_UPLOADED   = re.compile(r'uploaded=(\d+)')
@@ -136,25 +166,24 @@ class NewGreedyAddon:
 
     def __init__(self):
         logging.info(f"--- Starting NewGreedy v{CURRENT_VERSION} (mitmproxy mode) --- MrT0t0 ---")
-        logging.info(f"Max multiplier: {MAX_MULTIPLIER}x | Seeding: {SEEDING_MULTIPLIER}x | "
-                     f"Random factor: ±{int(RANDOM_FACTOR * 100)}%")
-        logging.info(f"Max simulated speed: {MAX_SPEED_MBPS} Mbps | "
-                     f"Global ratio limit: {GLOBAL_RATIO_LIMIT}")
+        logging.info(
+            f"Multiplier: {MAX_MULTIPLIER}x | Seeding: {SEEDING_MULTIPLIER}x | "
+            f"Random: ±{int(RANDOM_FACTOR * 100)}% | "
+            f"Speed cap: {MAX_SPEED_MBPS} Mbps | "
+            f"Ratio limit: {GLOBAL_RATIO_LIMIT}"
+        )
         threading.Thread(target=check_for_updates, daemon=True).start()
 
     def request(self, flow: http.HTTPFlow) -> None:
         """
-        Called by mitmproxy for every intercepted request (HTTP and HTTPS).
-        Identifies tracker announces by required query parameters and rewrites uploaded.
+        Called for every intercepted request (HTTP and HTTPS).
+        Identifies tracker announces and rewrites 'uploaded' in-place.
         """
-        global is_in_cooldown, cooldown_end_time
-
         url        = flow.request.pretty_url
         ul_match   = self._RE_UPLOADED.search(url)
         dl_match   = self._RE_DOWNLOADED.search(url)
         hash_match = self._RE_INFO_HASH.search(url)
 
-        # Not a tracker announce — pass through unmodified
         if not (ul_match and dl_match and hash_match):
             return
 
@@ -169,43 +198,7 @@ class NewGreedyAddon:
             ip_match = self._RE_PEER_IP.search(url)
             label    = resolve_host(ip_match.group(1)) if ip_match else info_hash[:10]
 
-            now = time.monotonic()
-
-            # ── Determine multiplier and mode ──────────────────────────────────
-            with _cooldown_lock:
-                if is_in_cooldown and now > cooldown_end_time:
-                    is_in_cooldown = False
-                    logging.info("Cooldown period ended. Resuming normal multiplier.")
-
-                if is_in_cooldown:
-                    multiplier, mode = 1.0, "COOLDOWN"
-                elif left == 0:
-                    multiplier, mode = SEEDING_MULTIPLIER, "SEEDING"
-                else:
-                    multiplier, mode = MAX_MULTIPLIER, "DOWNLOADING"
-
-                multiplier *= 1 + random.uniform(-RANDOM_FACTOR, RANDOM_FACTOR)
-
-                if not is_in_cooldown and stats_manager.global_ratio() > GLOBAL_RATIO_LIMIT:
-                    is_in_cooldown    = True
-                    cooldown_end_time = now + COOLDOWN_MINUTES * 60
-                    multiplier, mode  = 1.0, "COOLDOWN"
-                    logging.warning(
-                        f"Global ratio limit reached ({GLOBAL_RATIO_LIMIT}). "
-                        f"Entering cooldown for {COOLDOWN_MINUTES} minutes."
-                    )
-
-            # ── Compute and cap reported upload ────────────────────────────────
-            reported_ul = int(real_dl * multiplier)
-
-            prev = stats_manager.get(info_hash)
-            if prev:
-                delta = now - prev.get('last_update', now)
-                if delta > 0:
-                    cap         = prev.get('uploaded_reported', 0) + int(MAX_SPEED_BPS * delta)
-                    reported_ul = min(reported_ul, cap)
-
-            stats_manager.update(info_hash, real_dl, real_ul, reported_ul)
+            reported_ul, mode = compute_reported_upload(info_hash, real_dl, real_ul, left)
 
             logging.info(
                 f"[{mode}] {label} | "
@@ -215,13 +208,11 @@ class NewGreedyAddon:
                 f"Protocol: {flow.request.scheme.upper()}"
             )
 
-            # ── Rewrite uploaded in the request query string ───────────────────
-            # mitmproxy exposes query as a mutable MultiDict — direct assignment
+            # Rewrite uploaded directly in the mitmproxy query MultiDict
             flow.request.query['uploaded'] = str(reported_ul)
 
         except Exception as e:
-            logging.error(f"Addon handler error: {e}", exc_info=True)
+            logging.error(f"Addon error: {e}", exc_info=True)
 
 
-# mitmproxy discovers the addon via this module-level variable
 addons = [NewGreedyAddon()]

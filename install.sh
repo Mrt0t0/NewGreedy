@@ -2,11 +2,11 @@
 # Installation script for NewGreedy v1.0
 # MrT0t0 - https://github.com/Mrt0t0/NewGreedy/
 #
-# Modes:
-#   Standard (HTTP only)  : sudo ./install.sh
-#   mitmproxy (HTTP+HTTPS): sudo ./install.sh --mitmproxy
+# Usage:
+#   Standard mode  (HTTP trackers) : sudo ./install.sh
+#   mitmproxy mode (HTTPS trackers): sudo ./install.sh --mitmproxy
 #
-# This script clones or updates the repo directly into INSTALL_DIR
+# Clones or updates the repo directly into INSTALL_DIR
 # so that future updates work with: cd /opt/newgreedy && git pull origin main
 
 set -euo pipefail
@@ -15,12 +15,10 @@ set -euo pipefail
 REPO_URL="https://github.com/Mrt0t0/NewGreedy.git"
 INSTALL_DIR="/opt/newgreedy"
 SERVICE_NAME="newgreedy.service"
-SERVICE_USER="newgreedy"
 PYTHON_PATH=$(which python3)
 VERSION="1.0"
 MODE="standard"
 
-# Parse arguments
 for arg in "$@"; do
     case $arg in
         --mitmproxy) MODE="mitmproxy" ;;
@@ -49,15 +47,21 @@ command -v python3 &>/dev/null || fail "python3 is required: apt install python3
 command -v openssl &>/dev/null && ok "openssl detected" || warn "openssl not found (optional)"
 
 if [[ "$MODE" == "mitmproxy" ]]; then
-    command -v mitmdump &>/dev/null || {
+    if ! command -v mitmdump &>/dev/null; then
         warn "mitmdump not found — installing mitmproxy..."
         $PYTHON_PATH -m pip install --quiet mitmproxy
         ok "mitmproxy installed"
-    }
+    else
+        ok "mitmdump detected: $(which mitmdump)"
+    fi
 fi
 
 # ── Detect existing installation ──────────────────────────────────────────────
 IS_UPDATE=false
+
+# Allow git to access the directory even if owned by root
+git config --global --add safe.directory "$INSTALL_DIR" 2>/dev/null || true
+
 if [[ -d "$INSTALL_DIR/.git" ]]; then
     IS_UPDATE=true
     warn "Existing git installation detected — updating..."
@@ -72,7 +76,8 @@ fi
 
 # ── Stop service ───────────────────────────────────────────────────────────────
 systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null && {
-    systemctl stop "$SERVICE_NAME"; ok "Service stopped"
+    systemctl stop "$SERVICE_NAME"
+    ok "Service stopped"
 }
 
 # ── Clone or update ────────────────────────────────────────────────────────────
@@ -98,33 +103,31 @@ if [[ -n "$LATEST_BACKUP" ]]; then
     ok "Config restored — review config.ini.new for new parameters"
 fi
 
-# ── System user ────────────────────────────────────────────────────────────────
-id "$SERVICE_USER" &>/dev/null || {
-    useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER"
-    ok "System user '$SERVICE_USER' created"
-} && ok "User '$SERVICE_USER' ready"
-
-# ── Permissions ────────────────────────────────────────────────────────────────
-chown -R "$SERVICE_USER":"$SERVICE_USER" "$INSTALL_DIR"
-chmod 750 "$INSTALL_DIR"
-chmod 640 "$INSTALL_DIR/config.ini" 2>/dev/null || true
-ok "Permissions applied"
+# ── Permissions (run as root) ─────────────────────────────────────────────────
+chown -R root:root "$INSTALL_DIR"
+chmod 755 "$INSTALL_DIR"
+chmod 644 "$INSTALL_DIR/config.ini" 2>/dev/null || true
+ok "Permissions applied (root)"
 
 # ── Python deps ────────────────────────────────────────────────────────────────
 $PYTHON_PATH -m pip install --upgrade --quiet requests
-ok "Python dependencies installed"
+ok "requests installed"
+if [[ "$MODE" == "mitmproxy" ]]; then
+    $PYTHON_PATH -m pip install --upgrade --quiet mitmproxy
+    ok "mitmproxy installed/updated"
+fi
 
 # ── Log file ───────────────────────────────────────────────────────────────────
 LOG_FILE=$(grep -i 'log_file' "$INSTALL_DIR/config.ini" 2>/dev/null \
     | head -1 | cut -d'=' -f2 | tr -d ' ' || echo "newgreedy.log")
 [[ "$LOG_FILE" != /* ]] && LOG_FILE="$INSTALL_DIR/$LOG_FILE"
 touch "$LOG_FILE"
-chown "$SERVICE_USER":"$SERVICE_USER" "$LOG_FILE"
+chmod 644 "$LOG_FILE"
 ok "Log file: $LOG_FILE"
 
-# ── systemd service ────────────────────────────────────────────────────────────
+# ── Resolve mitmdump path ──────────────────────────────────────────────────────
 if [[ "$MODE" == "mitmproxy" ]]; then
-    MITMDUMP_PATH=$(which mitmdump)
+    MITMDUMP_PATH=$(which mitmdump 2>/dev/null || echo "/usr/local/bin/mitmdump")
     EXEC_START="$MITMDUMP_PATH -p 3456 --ssl-insecure -s ${INSTALL_DIR}/newgreedy_addon.py"
     DESCRIPTION="NewGreedy v${VERSION} — mitmproxy mode (HTTP+HTTPS)"
 else
@@ -132,6 +135,7 @@ else
     DESCRIPTION="NewGreedy v${VERSION} — standard mode (HTTP)"
 fi
 
+# ── systemd service (runs as root) ────────────────────────────────────────────
 cat > /etc/systemd/system/$SERVICE_NAME << EOF
 [Unit]
 Description=${DESCRIPTION}
@@ -140,15 +144,11 @@ Documentation=https://github.com/Mrt0t0/NewGreedy
 
 [Service]
 Type=simple
-User=${SERVICE_USER}
+User=root
 WorkingDirectory=${INSTALL_DIR}
 ExecStart=${EXEC_START}
 Restart=on-failure
 RestartSec=10s
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ReadWritePaths=${INSTALL_DIR}
 StandardOutput=append:${LOG_FILE}
 StandardError=append:${LOG_FILE}
 
@@ -160,10 +160,16 @@ systemctl daemon-reload
 systemctl enable "$SERVICE_NAME"
 systemctl restart "$SERVICE_NAME"
 
-sleep 2
-systemctl is-active --quiet "$SERVICE_NAME" \
-    && ok "Service started successfully" \
-    || fail "Service failed to start. Check: journalctl -u $SERVICE_NAME -n 30"
+# ── Startup check ─────────────────────────────────────────────────────────────
+sleep 3
+if systemctl is-active --quiet "$SERVICE_NAME"; then
+    ok "Service started successfully"
+else
+    echo ""
+    warn "Service did not start — full error below:"
+    journalctl -u "$SERVICE_NAME" -n 20 --no-pager
+    fail "Fix the error above then run: systemctl restart $SERVICE_NAME"
+fi
 
 # ── Summary ────────────────────────────────────────────────────────────────────
 echo ""
@@ -173,6 +179,7 @@ echo "=================================================="
 echo ""
 echo "  Directory  : $INSTALL_DIR"
 echo "  Mode       : $MODE"
+echo "  User       : root"
 echo "  Service    : $SERVICE_NAME"
 echo "  Log        : $LOG_FILE"
 echo ""
@@ -185,9 +192,9 @@ echo "  Future updates:"
 echo "    cd $INSTALL_DIR && git pull origin main && systemctl restart $SERVICE_NAME"
 echo ""
 if [[ "$MODE" == "mitmproxy" ]]; then
-    echo -e "  ${YELLOW}HTTPS setup required:${NC}"
-    echo "    1. Run once to generate CA: mitmdump -p 3456 --ssl-insecure -s $INSTALL_DIR/newgreedy_addon.py"
-    echo "    2. Install CA in qBittorrent: cp ~/.mitmproxy/mitmproxy-ca-cert.pem /usr/local/share/ca-certificates/mitmproxy.crt && update-ca-certificates"
-    echo "    3. Restart service: systemctl restart $SERVICE_NAME"
+    echo -e "  ${YELLOW}HTTPS setup — install mitmproxy CA in qBittorrent:${NC}"
+    echo "    1. CA location: ~/.mitmproxy/mitmproxy-ca-cert.pem"
+    echo "    2. Install CA : cp ~/.mitmproxy/mitmproxy-ca-cert.pem /usr/local/share/ca-certificates/mitmproxy.crt && update-ca-certificates"
+    echo "    3. In qBittorrent: Tools → Options → Connection → Proxy → HTTP / 127.0.0.1 / 3456"
     echo ""
 fi
