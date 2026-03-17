@@ -13,6 +13,7 @@ import random
 import threading
 import socket
 import ssl
+import select
 import subprocess
 from pathlib import Path
 
@@ -37,6 +38,7 @@ SSL_CERTFILE          = config['DEFAULT'].get('ssl_certfile', 'cert.pem')
 SSL_KEYFILE           = config['DEFAULT'].get('ssl_keyfile', 'key.pem')
 SSL_VERIFY_TRACKERS   = config['DEFAULT'].getboolean('ssl_verify_trackers', True)
 SSL_AUTOGENERATE_CERT = config['DEFAULT'].getboolean('ssl_autogenerate_cert', True)
+TRACKER_TIMEOUT       = int(config['DEFAULT'].get('tracker_timeout', 5))
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 # Dual output: log file + console stream
@@ -192,9 +194,9 @@ stats_manager = StatsManager()
 class NewGreedyProxyHandler(http.server.BaseHTTPRequestHandler):
     """
     Intercepts GET requests from the BitTorrent client.
-    If the request is a tracker announce, it rewrites the 'uploaded' field
-    according to the configured multiplier and forwards the modified request.
-    Non-announce requests are forwarded transparently.
+    - Tracker announce requests: rewrites the 'uploaded' field and forwards.
+    - CONNECT requests: establishes a raw TCP tunnel for HTTPS tracker connections.
+    - All other requests: forwarded transparently.
     """
 
     # Pre-compiled regex patterns — evaluated once at class definition, not per request
@@ -207,9 +209,9 @@ class NewGreedyProxyHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         global is_in_cooldown, cooldown_end_time
 
-        url       = self.path
-        ul_match  = self._RE_UPLOADED.search(url)
-        dl_match  = self._RE_DOWNLOADED.search(url)
+        url        = self.path
+        ul_match   = self._RE_UPLOADED.search(url)
+        dl_match   = self._RE_DOWNLOADED.search(url)
         hash_match = self._RE_INFO_HASH.search(url)
 
         # Not a tracker announce — forward as-is
@@ -288,6 +290,51 @@ class NewGreedyProxyHandler(http.server.BaseHTTPRequestHandler):
             logging.error(f"Handler error: {e}", exc_info=True)
             self.send_error(500)
 
+    def do_CONNECT(self):
+        """
+        Handle CONNECT tunnel requests issued by the BitTorrent client
+        when connecting to HTTPS trackers through the proxy.
+        Establishes a raw TCP tunnel between the client and the target host.
+        Note: traffic inside the tunnel is not intercepted or modified —
+        only plain HTTP announce requests (do_GET) are rewritten.
+        """
+        try:
+            host, port_str = self.path.split(":")
+            port = int(port_str)
+
+            # Open a direct TCP connection to the target tracker
+            remote = socket.create_connection((host, port), timeout=TRACKER_TIMEOUT)
+
+            # Inform the client that the tunnel is open
+            self.send_response(200, "Connection Established")
+            self.end_headers()
+
+            # Relay raw bytes in both directions until one side closes
+            self.connection.setblocking(False)
+            remote.setblocking(False)
+            sockets = [self.connection, remote]
+
+            while True:
+                readable, _, errored = select.select(sockets, [], sockets, 10)
+                if errored:
+                    break
+                for s in readable:
+                    data = s.recv(4096)
+                    if not data:
+                        return
+                    target = remote if s is self.connection else self.connection
+                    target.sendall(data)
+
+        except Exception as e:
+            logging.error(f"CONNECT tunnel error: {e}")
+            if not self.wfile.closed:
+                self.send_error(502)
+        finally:
+            try:
+                remote.close()
+            except Exception:
+                pass
+
     def _forward(self, url: str):
         """
         Forward the (possibly modified) request to the remote tracker and
@@ -301,7 +348,7 @@ class NewGreedyProxyHandler(http.server.BaseHTTPRequestHandler):
 
         try:
             resp = requests.get(
-                url, headers=headers, timeout=15,
+                url, headers=headers, timeout=TRACKER_TIMEOUT,
                 verify=SSL_VERIFY_TRACKERS, stream=False
             )
             self.send_response(resp.status_code)
@@ -354,7 +401,8 @@ if __name__ == '__main__':
     logging.info(f"Max multiplier: {MAX_MULTIPLIER}x | Seeding: {SEEDING_MULTIPLIER}x | "
                  f"Random factor: ±{int(RANDOM_FACTOR * 100)}%")
     logging.info(f"Max simulated speed: {MAX_SPEED_MBPS} Mbps | "
-                 f"Global ratio limit: {GLOBAL_RATIO_LIMIT}")
+                 f"Global ratio limit: {GLOBAL_RATIO_LIMIT} | "
+                 f"Tracker timeout: {TRACKER_TIMEOUT}s")
 
     server = ThreadingServer(("", LISTEN_PORT), NewGreedyProxyHandler, ssl_context=ssl_ctx)
     threading.Thread(target=server.serve_forever, daemon=True).start()
