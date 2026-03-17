@@ -194,8 +194,10 @@ stats_manager = StatsManager()
 class NewGreedyProxyHandler(http.server.BaseHTTPRequestHandler):
     """
     Intercepts GET requests from the BitTorrent client.
-    - Tracker announce requests: rewrites the 'uploaded' field and forwards.
-    - CONNECT requests: establishes a raw TCP tunnel for HTTPS tracker connections.
+    - Tracker announce (HTTP):  rewrites 'uploaded' field and forwards.
+    - CONNECT requests (HTTPS): establishes a raw TCP tunnel.
+      Note: traffic inside CONNECT tunnels is NOT intercepted or modified.
+      Use newgreedy_addon.py (mitmproxy) for full HTTPS announce interception.
     - All other requests: forwarded transparently.
     """
 
@@ -223,7 +225,7 @@ class NewGreedyProxyHandler(http.server.BaseHTTPRequestHandler):
             info_hash     = urllib.parse.unquote(hash_match.group(1))
             real_dl       = int(dl_match.group(1))
             real_ul       = int(ul_match.group(1))
-            real_ul_token = ul_match.group(0)         # Full "uploaded=N" token for replacement
+            real_ul_token = ul_match.group(0)         # Full "uploaded=N" token for URL replacement
 
             left_match = self._RE_LEFT.search(url)
             left       = int(left_match.group(1)) if left_match else 1  # Assume incomplete if missing
@@ -279,7 +281,8 @@ class NewGreedyProxyHandler(http.server.BaseHTTPRequestHandler):
                 f"[{mode}] {label} | "
                 f"DL: {real_dl / 1_048_576:.2f} MB | "
                 f"Real UL: {real_ul / 1_048_576:.2f} MB | "
-                f"Reported UL: {reported_ul / 1_048_576:.2f} MB"
+                f"Reported UL: {reported_ul / 1_048_576:.2f} MB | "
+                f"Protocol: HTTP"
             )
 
             # Replace the original uploaded value and forward the modified request
@@ -292,11 +295,9 @@ class NewGreedyProxyHandler(http.server.BaseHTTPRequestHandler):
 
     def do_CONNECT(self):
         """
-        Handle CONNECT tunnel requests issued by the BitTorrent client
-        when connecting to HTTPS trackers through the proxy.
-        Establishes a raw TCP tunnel between the client and the target host.
-        Note: traffic inside the tunnel is not intercepted or modified —
-        only plain HTTP announce requests (do_GET) are rewritten.
+        Handle CONNECT tunnel requests for HTTPS tracker connections.
+        Establishes a raw TCP tunnel — traffic is NOT intercepted or modified.
+        For full HTTPS announce interception, use newgreedy_addon.py (mitmproxy mode).
         """
         try:
             host, port_str = self.path.split(":")
@@ -305,7 +306,7 @@ class NewGreedyProxyHandler(http.server.BaseHTTPRequestHandler):
             # Open a direct TCP connection to the target tracker
             remote = socket.create_connection((host, port), timeout=TRACKER_TIMEOUT)
 
-            # Inform the client that the tunnel is open
+            # Inform the client the tunnel is open
             self.send_response(200, "Connection Established")
             self.end_headers()
 
