@@ -1,391 +1,499 @@
-# NewGreedy v1.0
-# MrT0t0 - https://github.com/Mrt0t0/NewGreedy/
+#!/usr/bin/env python3
+"""
+NewGreedy v1.1 — Standard HTTP/HTTPS proxy for BitTorrent clients
+"""
 
-import http.server
-import socketserver
-import urllib.parse
+import binascii
 import configparser
-import requests
+import json
 import logging
-import time
-import re
+import os
 import random
-import threading
+import re
+import select
 import socket
 import ssl
-import select
 import subprocess
+import sys
+import threading
+import time
+import urllib.parse
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-CURRENT_VERSION = "1.0"
+import requests
 
-# ── Configuration ──────────────────────────────────────────────────────────────
-config = configparser.ConfigParser()
-config.read('config.ini')
+VERSION     = "1.1"
+GITHUB_REPO = "Mrt0t0/NewGreedy"
 
-LISTEN_PORT           = int(config['DEFAULT'].get('listen_port', 3456))
-MAX_MULTIPLIER        = float(config['DEFAULT'].get('max_upload_multiplier', 1.6))
-SEEDING_MULTIPLIER    = float(config['DEFAULT'].get('seeding_multiplier', 1.2))
-RANDOM_FACTOR         = float(config['DEFAULT'].get('randomization_factor', 0.25))
-MAX_SPEED_MBPS        = float(config['DEFAULT'].get('max_simulated_speed_mbps', 7.6))
-MAX_SPEED_BPS         = MAX_SPEED_MBPS * 1024 * 1024 / 8
-GLOBAL_RATIO_LIMIT    = float(config['DEFAULT'].get('global_ratio_limit', 1.8))
-COOLDOWN_MINUTES      = int(config['DEFAULT'].get('cooldown_duration_minutes', 10))
-LOG_FILE              = config['LOGGING'].get('log_file', 'newgreedy.log')
-ENABLE_HTTPS          = config['DEFAULT'].getboolean('enable_https', False)
-SSL_CERTFILE          = config['DEFAULT'].get('ssl_certfile', 'cert.pem')
-SSL_KEYFILE           = config['DEFAULT'].get('ssl_keyfile', 'key.pem')
-SSL_VERIFY_TRACKERS   = config['DEFAULT'].getboolean('ssl_verify_trackers', True)
-SSL_AUTOGENERATE_CERT = config['DEFAULT'].getboolean('ssl_autogenerate_cert', True)
-TRACKER_TIMEOUT       = int(config['DEFAULT'].get('tracker_timeout', 5))
+QBIT_USER_AGENTS = [
+    "qBittorrent/5.0.0",
+    "qBittorrent/4.6.7",
+    "qBittorrent/4.6.5",
+    "qBittorrent/4.5.5",
+    "qBittorrent/4.4.5",
+    "Deluge/2.1.1",
+    "Transmission/3.00",
+    "uTorrent/3.6.0",
+]
 
-# ── Logging ────────────────────────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] - %(message)s',
-    handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()]
-)
+KNOWN_CLIENT_PREFIXES = ("qbittorrent", "deluge", "transmission", "utorrent", "libtorrent")
 
-# ── Cooldown state ─────────────────────────────────────────────────────────────
-is_in_cooldown    = False
-cooldown_end_time = 0
-_cooldown_lock    = threading.Lock()
+# ── Logging ───────────────────────────────────────────────────────────────────
 
-# ── SSL helpers ────────────────────────────────────────────────────────────────
+def setup_logging(log_file):
+    logger = logging.getLogger("newgreedy")
+    logger.setLevel(logging.DEBUG)
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", "%Y-%m-%d %H:%M:%S")
+    fh = logging.FileHandler(log_file, encoding="utf-8")
+    fh.setFormatter(fmt)
+    ch = logging.StreamHandler()
+    ch.setFormatter(fmt)
+    logger.addHandler(fh)
+    logger.addHandler(ch)
+    return logger
 
-def ensure_ssl_certificate(certfile: str, keyfile: str) -> bool:
-    """
-    Check whether the certificate and private key files exist.
-    If missing and ssl_autogenerate_cert is enabled, generate a self-signed
-    certificate via openssl. Returns True if a usable certificate is available.
-    """
-    if Path(certfile).exists() and Path(keyfile).exists():
-        logging.info(f"SSL: Certificate found — {certfile} / {keyfile}")
-        return True
+logger = setup_logging("newgreedy.log")
 
-    if not SSL_AUTOGENERATE_CERT:
-        logging.error(f"SSL: Certificate not found ({certfile}) and auto-generation is disabled.")
-        return False
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-    logging.warning("SSL: Certificate missing — generating self-signed certificate (dev only)...")
+def normalize_info_hash(raw):
+    """Decode URL-encoded binary info_hash to readable hex string."""
+    if not raw:
+        return "unknown"
     try:
-        subprocess.run([
-            "openssl", "req", "-x509", "-newkey", "rsa:4096",
-            "-keyout", keyfile, "-out", certfile,
-            "-days", "365", "-nodes", "-subj", "/CN=localhost"
-        ], check=True, capture_output=True, text=True)
-        logging.info(f"SSL: Self-signed certificate generated — {certfile} / {keyfile}")
-        return True
-    except FileNotFoundError:
-        logging.error("SSL: openssl not found. Install openssl or provide a certificate manually.")
-        return False
-    except subprocess.CalledProcessError as e:
-        logging.error(f"SSL: Certificate generation failed — {e.stderr}")
-        return False
+        decoded  = urllib.parse.unquote_to_bytes(raw)
+        hex_hash = binascii.hexlify(decoded).decode("ascii")
+        if len(hex_hash) == 40:
+            return hex_hash
+    except Exception:
+        pass
+    return "".join(c if c.isprintable() and c not in "\r\n" else "?" for c in raw)
 
-
-def build_ssl_context(certfile: str, keyfile: str) -> ssl.SSLContext:
-    """Create a server-side SSLContext enforcing TLS 1.2 as the minimum version."""
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-    ctx.load_cert_chain(certfile=certfile, keyfile=keyfile)
-    return ctx
-
-
-# ── HTTPS-capable threaded server ─────────────────────────────────────────────
-
-class ThreadingServer(socketserver.ThreadingTCPServer):
+def resolve_user_agent(mode, ua_value, original_ua):
     """
-    ThreadingTCPServer with optional SSL/TLS wrapping.
-    allow_reuse_address avoids "Address already in use" errors on restart.
+    Resolve User-Agent to send to tracker.
+    mode: random | fixed | passthrough
     """
-    allow_reuse_address = True
+    if mode == "passthrough":
+        return original_ua
+    if mode == "fixed":
+        return ua_value if ua_value else random.choice(QBIT_USER_AGENTS)
+    # random (default)
+    if original_ua and any(p in original_ua.lower() for p in KNOWN_CLIENT_PREFIXES):
+        return original_ua
+    return random.choice(QBIT_USER_AGENTS)
 
-    def __init__(self, server_address, handler, ssl_context=None):
-        super().__init__(server_address, handler, bind_and_activate=False)
-        if ssl_context:
-            self.socket = ssl_context.wrap_socket(self.socket, server_side=True)
-        self.server_bind()
-        self.server_activate()
+# ── Config ────────────────────────────────────────────────────────────────────
 
+def load_config(path="config.ini"):
+    cfg = configparser.ConfigParser(interpolation=None)
+    cfg.read(path, encoding="utf-8")
+    return cfg
 
-# ── GitHub update check ────────────────────────────────────────────────────────
+def validate_config(cfg):
+    ok = True
+    def gf(s, k, fb):
+        try: return cfg.getfloat(s, k)
+        except: return fb
+    def gi(s, k, fb):
+        try: return cfg.getint(s, k)
+        except: return fb
 
-def check_for_updates():
-    """Query the GitHub Releases API and log a notice if a newer version exists."""
+    mul   = gf("multiplier",    "max_upload_multiplier",     1.6)
+    seed  = gf("multiplier",    "seeding_multiplier",        1.2)
+    rand  = gf("multiplier",    "randomization_factor",      0.25)
+    rl    = gf("multiplier",    "global_ratio_limit",        1.8)
+    slope = gf("multiplier",    "max_upload_slope",          2.0)
+    pvar  = gf("anti_detection","peer_variance",             0.15)
+    to    = gi("proxy",         "tracker_timeout",           5)
+    port  = gi("proxy",         "listen_port",               3456)
+
     try:
-        response = requests.get(
-            "https://api.github.com/repos/Mrt0t0/NewGreedy/releases/latest",
-            timeout=10
-        )
-        if response.status_code == 404:
-            logging.info("Update check: no releases found on GitHub.")
-            return
-        response.raise_for_status()
-        latest = response.json().get("tag_name", "").lstrip("v")
-        if latest and float(latest) > float(CURRENT_VERSION):
-            logging.info(f"New version available: v{latest} — https://github.com/Mrt0t0/NewGreedy/releases")
-        else:
-            logging.info("NewGreedy is up to date.")
-    except Exception as e:
-        logging.warning(f"Could not check for updates: {e}")
+        ua_mode = cfg.get("anti_detection", "user_agent_mode", fallback="random").strip().lower()
+    except Exception:
+        ua_mode = "random"
 
+    logger.info("── Config validation ──────────────────────────────────")
+    if mul > 5.0:
+        logger.warning(f"  max_upload_multiplier={mul} > 5.0 — high detection risk")
+    if seed > 3.0:
+        logger.warning(f"  seeding_multiplier={seed} > 3.0 — high detection risk")
+    if rand > 0.5:
+        logger.warning(f"  randomization_factor={rand} > 0.5 — excessive variance")
+    if rl < 0.5:
+        logger.warning(f"  global_ratio_limit={rl} < 0.5 — cooldown triggers immediately")
+    if slope > 5.0:
+        logger.warning(f"  max_upload_slope={slope} > 5.0 — incoherent progression risk")
+    if pvar > 0.5:
+        logger.warning(f"  peer_variance={pvar} > 0.5 — suspicious peer variance")
+    if port < 1024:
+        logger.warning(f"  listen_port={port} < 1024 — requires root/admin privileges")
+    if ua_mode not in ("random", "fixed", "passthrough"):
+        logger.warning(f"  user_agent_mode=\"{ua_mode}\" unknown — falling back to random")
+    if to < 1:
+        logger.error(f"  tracker_timeout={to} < 1 — blocking value")
+        ok = False
 
-# ── Network helpers ────────────────────────────────────────────────────────────
+    ua_desc = {"random": "random (built-in list)", "fixed": "fixed", "passthrough": "passthrough"}.get(ua_mode, ua_mode)
+    logger.info(f"  listen_port={port} | multiplier={mul} | seeding={seed} | ratio_limit={rl}")
+    logger.info(f"  slope={slope} | peer_variance={pvar} | timeout={to}s | ua_mode={ua_desc}")
+    logger.info("── Config OK ──────────────────────────────────────────")
+    return ok
 
-def resolve_host(ip: str) -> str:
-    """Attempt a reverse DNS lookup on the given IP. Returns the IP on failure."""
-    try:
-        return socket.gethostbyaddr(ip)[0]
-    except OSError:
-        return ip
-
-
-# ── Stats manager ──────────────────────────────────────────────────────────────
+# ── Stats ─────────────────────────────────────────────────────────────────────
 
 class StatsManager:
-    """
-    Thread-safe in-memory store tracking per-torrent transfer statistics.
-    Used to compute the global ratio and enforce the upload speed cap.
-    """
+    def __init__(self, cfg):
+        self._lock           = threading.Lock()
+        self._global_ul      = 0.0
+        self._global_dl      = 0.0
+        self._torrents       = {}
+        self._cooldown_until = 0.0
 
-    def __init__(self):
-        self._lock     = threading.Lock()
-        self._torrents = {}
+        def gf(s, k, fb):
+            try: return cfg.getfloat(s, k)
+            except: return fb
+        def gi(s, k, fb):
+            try: return cfg.getint(s, k)
+            except: return fb
+        def gb(s, k, fb):
+            try: return cfg.getboolean(s, k)
+            except: return fb
+        def gs(s, k, fb):
+            try: return cfg.get(s, k, fallback=fb).strip()
+            except: return fb
 
-    def update(self, info_hash: str, downloaded: int, uploaded_real: int, uploaded_reported: int):
-        """Insert or overwrite the stats entry for a given info_hash."""
-        with self._lock:
-            self._torrents[info_hash] = {
-                'downloaded':        downloaded,
-                'uploaded_real':     uploaded_real,
-                'uploaded_reported':  uploaded_reported,
-                'last_update':       time.monotonic(),
-            }
+        self._ratio_limit    = gf("multiplier",    "global_ratio_limit",        1.8)
+        self._cooldown_dur   = gf("multiplier",    "cooldown_duration_minutes", 10.0) * 60
+        self._mul            = gf("multiplier",    "max_upload_multiplier",     1.6)
+        self._seed_mul       = gf("multiplier",    "seeding_multiplier",        1.2)
+        self._rand           = gf("multiplier",    "randomization_factor",      0.25)
+        self._max_speed_bps  = gf("multiplier",    "max_simulated_speed_mbps",  7.6) * 1_000_000 / 8
+        self._slope          = gf("multiplier",    "max_upload_slope",          2.0)
+        self._spoof_peers    = gb("anti_detection","spoof_peers",               True)
+        self._peer_variance  = gf("anti_detection","peer_variance",             0.15)
+        self._spoof_ua       = gb("anti_detection","spoof_user_agent",          True)
+        self._ua_mode        = gs("anti_detection","user_agent_mode",           "random").lower()
+        self._ua_value       = gs("anti_detection","user_agent_value",          "qBittorrent/4.6.7")
+        self._persist        = gb("stats",         "persist_stats",             True)
+        self._stats_file     = gs("stats",         "stats_file",                "stats.json")
 
-    def get(self, info_hash: str) -> dict:
-        """Return a snapshot of the stats entry for info_hash, or {} if unknown."""
-        with self._lock:
-            return dict(self._torrents.get(info_hash, {}))
+        if self._ua_mode not in ("random", "fixed", "passthrough"):
+            self._ua_mode = "random"
 
-    def global_ratio(self) -> float:
-        """Returns the global upload/download ratio. Returns 0.0 if no data yet."""
-        with self._lock:
-            total_dl = sum(t['downloaded']        for t in self._torrents.values())
-            total_ul = sum(t['uploaded_reported'] for t in self._torrents.values())
-        return total_ul / total_dl if total_dl > 0 else 0.0
+        if self._persist:
+            self._load_stats()
+            threading.Thread(target=self._autosave_loop, daemon=True, name="ng-autosave").start()
 
+    # ── Persistence ────────────────────────────────────────────────────────────
 
-stats_manager = StatsManager()
-
-
-# ── Core multiplier logic ──────────────────────────────────────────────────────
-
-def compute_reported_upload(info_hash: str, real_dl: int, real_ul: int, left: int) -> tuple:
-    """
-    Determine the reported upload value and mode label based on current state.
-    Applies multiplier, randomization, speed cap, and cooldown logic.
-    Returns (reported_upload, mode_label).
-    """
-    global is_in_cooldown, cooldown_end_time
-
-    now = time.monotonic()
-
-    with _cooldown_lock:
-        if is_in_cooldown and now > cooldown_end_time:
-            is_in_cooldown = False
-            logging.info("Cooldown period ended. Resuming normal multiplier.")
-
-        if is_in_cooldown:
-            multiplier, mode = 1.0, "COOLDOWN"
-        elif left == 0:
-            multiplier, mode = SEEDING_MULTIPLIER, "SEEDING"
-        else:
-            multiplier, mode = MAX_MULTIPLIER, "DOWNLOADING"
-
-        # Randomized variance to break statistical detection patterns
-        multiplier *= 1 + random.uniform(-RANDOM_FACTOR, RANDOM_FACTOR)
-
-        if not is_in_cooldown and stats_manager.global_ratio() > GLOBAL_RATIO_LIMIT:
-            is_in_cooldown    = True
-            cooldown_end_time = now + COOLDOWN_MINUTES * 60
-            multiplier, mode  = 1.0, "COOLDOWN"
-            logging.warning(
-                f"Global ratio limit reached ({GLOBAL_RATIO_LIMIT}). "
-                f"Entering cooldown for {COOLDOWN_MINUTES} minutes."
-            )
-
-    reported_ul = int(real_dl * multiplier)
-
-    # Speed cap: reported upload cannot exceed what could realistically
-    # have been transferred at MAX_SPEED_BPS since the last announce
-    prev = stats_manager.get(info_hash)
-    if prev:
-        delta = now - prev.get('last_update', now)
-        if delta > 0:
-            cap         = prev.get('uploaded_reported', 0) + int(MAX_SPEED_BPS * delta)
-            reported_ul = min(reported_ul, cap)
-
-    stats_manager.update(info_hash, real_dl, real_ul, reported_ul)
-    return reported_ul, mode
-
-
-# ── Proxy request handler ──────────────────────────────────────────────────────
-
-class NewGreedyProxyHandler(http.server.BaseHTTPRequestHandler):
-    """
-    Intercepts GET requests from the BitTorrent client.
-    - Tracker announce (HTTP) : rewrites 'uploaded' field and forwards.
-    - CONNECT requests (HTTPS): establishes a raw TCP tunnel.
-      Note: HTTPS tunnel traffic is NOT intercepted. Use mitmproxy mode for that.
-    - All other requests: forwarded transparently.
-    """
-
-    _RE_UPLOADED   = re.compile(r'uploaded=(\d+)')
-    _RE_DOWNLOADED = re.compile(r'downloaded=(\d+)')
-    _RE_INFO_HASH  = re.compile(r'info_hash=([^&]+)')
-    _RE_LEFT       = re.compile(r'left=(\d+)')
-    _RE_PEER_IP    = re.compile(r'ip=([\d\.]+)')
-
-    def do_GET(self):
-        url        = self.path
-        ul_match   = self._RE_UPLOADED.search(url)
-        dl_match   = self._RE_DOWNLOADED.search(url)
-        hash_match = self._RE_INFO_HASH.search(url)
-
-        if not (ul_match and dl_match and hash_match):
-            self._forward(url)
+    def _load_stats(self):
+        path = Path(self._stats_file)
+        if not path.exists():
             return
-
         try:
-            info_hash     = urllib.parse.unquote(hash_match.group(1))
-            real_dl       = int(dl_match.group(1))
-            real_ul       = int(ul_match.group(1))
-            real_ul_token = ul_match.group(0)
+            with path.open(encoding="utf-8") as f:
+                data = json.load(f)
+            self._global_ul      = float(data.get("global_real_uploaded",   0))
+            self._global_dl      = float(data.get("global_real_downloaded", 0))
+            self._torrents       = data.get("torrents", {})
+            self._cooldown_until = float(data.get("cooldown_until", 0))
+            logger.info(f"Stats loaded from {path} ({len(self._torrents)} torrents)")
+        except (json.JSONDecodeError, OSError, ValueError) as e:
+            logger.warning(f"Could not load stats: {e}")
 
-            left_match = self._RE_LEFT.search(url)
-            left       = int(left_match.group(1)) if left_match else 1
+    def save_stats(self):
+        try:
+            with self._lock:
+                payload = {
+                    "version":                VERSION,
+                    "global_real_uploaded":   self._global_ul,
+                    "global_real_downloaded": self._global_dl,
+                    "torrents":               self._torrents,
+                    "cooldown_until":         self._cooldown_until,
+                    "saved_at":               time.strftime("%Y-%m-%dT%H:%M:%S"),
+                }
+            path = Path(self._stats_file)
+            tmp  = path.with_suffix(".tmp")
+            with tmp.open("w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+            tmp.replace(path)
+        except OSError as e:
+            logger.warning(f"Could not save stats: {e}")
 
-            ip_match = self._RE_PEER_IP.search(url)
-            label    = resolve_host(ip_match.group(1)) if ip_match else info_hash[:10]
+    def _autosave_loop(self):
+        while True:
+            time.sleep(60)
+            self.save_stats()
 
-            reported_ul, mode = compute_reported_upload(info_hash, real_dl, real_ul, left)
+    # ── Core logic ─────────────────────────────────────────────────────────────
 
-            logging.info(
-                f"[{mode}] {label} | "
-                f"DL: {real_dl / 1_048_576:.2f} MB | "
-                f"Real UL: {real_ul / 1_048_576:.2f} MB | "
-                f"Reported UL: {reported_ul / 1_048_576:.2f} MB | "
-                f"Protocol: HTTP"
+    def compute_reported_upload(self, info_hash, real_ul, real_dl, left, interval=1800.0):
+        with self._lock:
+            now          = time.time()
+            is_seeding   = (left == 0)
+            display_hash = normalize_info_hash(info_hash)[:8]
+
+            # Cooldown active
+            if now < self._cooldown_until:
+                remaining = int(self._cooldown_until - now)
+                logger.info(f"[COOLDOWN]     {display_hash} — {remaining}s remaining")
+                self._store(info_hash, real_ul, real_dl, "COOLDOWN", real_ul)
+                return real_ul
+
+            # Trigger cooldown if ratio exceeded
+            if self._global_dl > 0:
+                ratio = self._global_ul / self._global_dl
+                if ratio >= self._ratio_limit:
+                    self._cooldown_until = now + self._cooldown_dur
+                    logger.info(f"[COOLDOWN TRIGGERED] ratio={ratio:.3f} >= {self._ratio_limit}")
+                    self._store(info_hash, real_ul, real_dl, "COOLDOWN", real_ul)
+                    return real_ul
+
+            # Multiplier + randomization
+            base = self._seed_mul if is_seeding else self._mul
+            mul  = max(1.0, base + base * self._rand * (random.random() * 2 - 1))
+
+            # Slope guard (coherent progression)
+            prev      = self._torrents.get(info_hash, {})
+            prev_rep  = float(prev.get("last_reported_uploaded", 0))
+            prev_dl   = float(prev.get("last_real_downloaded",   0))
+            delta_dl  = max(0.0, real_dl - prev_dl)
+            if delta_dl > 0:
+                max_delta = delta_dl * self._slope
+                if (real_ul * mul - prev_rep) > max_delta:
+                    mul = max(1.0, (prev_rep + max_delta) / max(real_ul, 1))
+
+            # Speed cap
+            cap      = prev_rep + self._max_speed_bps * interval
+            reported = int(min(real_ul * mul, cap))
+            reported = max(reported, real_ul)
+
+            mode = "SEEDING" if is_seeding else "DOWNLOADING"
+            self._global_ul += real_ul
+            self._global_dl += real_dl
+            self._store(info_hash, real_ul, real_dl, mode, reported)
+
+            logger.info(
+                f"[{mode:<11}] {display_hash} | "
+                f"DL: {real_dl/1e6:>8.2f} MB | "
+                f"Real UL: {real_ul/1e6:>8.2f} MB | "
+                f"Reported UL: {reported/1e6:>8.2f} MB | "
+                f"Mul: {mul:.3f}"
             )
+            return reported
 
-            new_url = url.replace(real_ul_token, f'uploaded={reported_ul}')
-            self._forward(new_url)
+    def _store(self, info_hash, real_ul, real_dl, mode, reported):
+        self._torrents[info_hash] = {
+            "info_hash_hex":          normalize_info_hash(info_hash),
+            "last_real_uploaded":     real_ul,
+            "last_real_downloaded":   real_dl,
+            "last_reported_uploaded": reported,
+            "mode":                   mode,
+            "updated_at":             time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
 
-        except Exception as e:
-            logging.error(f"Handler error: {e}", exc_info=True)
-            self.send_error(500)
+    def spoof_peers_params(self, params):
+        if not self._spoof_peers:
+            return params
+        for key in ("numwant", "num_peers", "num_seeds", "num_seeders"):
+            if key in params:
+                try:
+                    val = int(params[key])
+                    delta = int(val * self._peer_variance * (random.random() * 2 - 1))
+                    params[key] = str(max(0, val + delta))
+                except (ValueError, TypeError):
+                    pass
+        return params
 
-    def do_CONNECT(self):
-        """
-        Handle CONNECT tunnel for HTTPS tracker connections.
-        Raw TCP tunnel — traffic is NOT intercepted or modified.
-        Use newgreedy_addon.py (mitmproxy mode) for full HTTPS interception.
-        """
-        try:
-            host, port_str = self.path.split(":")
-            remote = socket.create_connection((host, int(port_str)), timeout=TRACKER_TIMEOUT)
-            self.send_response(200, "Connection Established")
-            self.end_headers()
+    def get_user_agent(self, original_ua):
+        if not self._spoof_ua:
+            return original_ua
+        return resolve_user_agent(self._ua_mode, self._ua_value, original_ua)
 
-            self.connection.setblocking(False)
-            remote.setblocking(False)
-            sockets = [self.connection, remote]
+# ── Proxy handler ─────────────────────────────────────────────────────────────
 
-            while True:
-                readable, _, errored = select.select(sockets, [], sockets, 10)
-                if errored:
-                    break
-                for s in readable:
-                    data = s.recv(4096)
-                    if not data:
-                        return
-                    (remote if s is self.connection else self.connection).sendall(data)
+ANNOUNCE_RE = re.compile(r"/announce", re.IGNORECASE)
 
-        except Exception as e:
-            logging.error(f"CONNECT tunnel error: {e}")
-            if not self.wfile.closed:
-                self.send_error(502)
-        finally:
-            try:
-                remote.close()
-            except Exception:
-                pass
-
-    def _forward(self, url: str):
-        """Forward request to tracker and relay response to client."""
-        headers = dict(self.headers)
-        parsed  = urllib.parse.urlsplit(url)
-        if parsed.netloc:
-            headers['Host'] = parsed.netloc
-        try:
-            resp = requests.get(
-                url, headers=headers, timeout=TRACKER_TIMEOUT,
-                verify=SSL_VERIFY_TRACKERS, stream=False
-            )
-            self.send_response(resp.status_code)
-            skip = {'transfer-encoding', 'content-length', 'connection'}
-            for k, v in resp.headers.items():
-                if k.lower() not in skip:
-                    self.send_header(k, v)
-            self.end_headers()
-            self.wfile.write(resp.content)
-        except requests.exceptions.SSLError as e:
-            logging.error(f"SSL error: {e}. Try ssl_verify_trackers = false for self-signed certs.")
-            if not self.wfile.closed:
-                self.send_error(502)
-        except Exception as e:
-            logging.error(f"Forward failed: {e}")
-            if not self.wfile.closed:
-                self.send_error(502)
+class ProxyHandler(BaseHTTPRequestHandler):
+    stats  = None
+    cfg    = None
 
     def log_message(self, fmt, *args):
         pass
 
+    def _rewrite_announce(self, params):
+        info_hash = params.get("info_hash", "")
+        try:
+            real_ul = int(params.get("uploaded",   0))
+            real_dl = int(params.get("downloaded", 0))
+            left    = int(params.get("left",       1))
+        except (ValueError, TypeError):
+            return params
+        reported = self.stats.compute_reported_upload(info_hash, real_ul, real_dl, left)
+        params["uploaded"] = str(reported)
+        return self.stats.spoof_peers_params(params)
 
-# ── Entry point ────────────────────────────────────────────────────────────────
+    def _forward(self, method, url, body=b""):
+        headers = dict(self.headers)
+        headers["User-Agent"] = self.stats.get_user_agent(headers.get("User-Agent", ""))
+        # Strip hop-by-hop headers
+        for h in ("proxy-connection", "proxy-authenticate", "proxy-authorization",
+                  "te", "trailers", "transfer-encoding", "upgrade", "connection", "keep-alive"):
+            headers.pop(h, None)
 
-if __name__ == '__main__':
-    logging.info(f"--- Starting NewGreedy v{CURRENT_VERSION} --- MrT0t0 ---")
-    threading.Thread(target=check_for_updates, daemon=True).start()
+        parsed = urllib.parse.urlparse(url)
+        if ANNOUNCE_RE.search(parsed.path):
+            params    = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
+            params    = self._rewrite_announce(params)
+            new_query = urllib.parse.urlencode(params)
+            url       = urllib.parse.urlunparse(parsed._replace(query=new_query))
 
-    ssl_ctx  = None
-    protocol = "HTTP"
-    if ENABLE_HTTPS:
-        if ensure_ssl_certificate(SSL_CERTFILE, SSL_KEYFILE):
-            ssl_ctx  = build_ssl_context(SSL_CERTFILE, SSL_KEYFILE)
-            protocol = "HTTPS (TLS 1.2+)"
-        else:
-            logging.critical("Cannot start in HTTPS mode: certificate unavailable. Aborting.")
-            raise SystemExit(1)
+        try:
+            timeout = self.cfg.getint("proxy", "tracker_timeout", fallback=5)
+            verify  = self.cfg.getboolean("ssl", "ssl_verify_trackers", fallback=True)
+            resp = requests.request(method, url, headers=headers, data=body,
+                                    timeout=timeout, verify=verify, allow_redirects=True)
+        except requests.exceptions.SSLError as e:
+            logger.error(f"SSL error → {url}: {e}")
+            self.send_error(502, "SSL error"); return
+        except requests.exceptions.ConnectionError as e:
+            logger.error(f"Connection error → {url}: {e}")
+            self.send_error(502, "Connection error"); return
+        except requests.exceptions.Timeout:
+            logger.warning(f"Tracker timeout → {url}")
+            self.send_error(504, "Tracker timeout"); return
+        except Exception as e:
+            logger.error(f"Forward error → {url}: {e}")
+            self.send_error(502, str(e)); return
 
-    logging.info(f"Proxy listening on port {LISTEN_PORT} [{protocol}]")
-    logging.info(
-        f"Multiplier: {MAX_MULTIPLIER}x | Seeding: {SEEDING_MULTIPLIER}x | "
-        f"Random: ±{int(RANDOM_FACTOR * 100)}% | "
-        f"Speed cap: {MAX_SPEED_MBPS} Mbps | "
-        f"Ratio limit: {GLOBAL_RATIO_LIMIT} | "
-        f"Timeout: {TRACKER_TIMEOUT}s"
-    )
+        self.send_response(resp.status_code)
+        skip = {"content-encoding", "transfer-encoding", "connection",
+                "keep-alive", "proxy-authenticate", "te", "trailers", "upgrade"}
+        for k, v in resp.headers.items():
+            if k.lower() not in skip:
+                self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(resp.content)
 
-    server = ThreadingServer(("", LISTEN_PORT), NewGreedyProxyHandler, ssl_context=ssl_ctx)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    logging.info("Proxy running. Press Ctrl+C to stop.")
+    def do_GET(self):
+        if not self.path.startswith("http"):
+            self.send_error(400, "Absolute URL required"); return
+        self._forward("GET", self.path)
 
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body   = self.rfile.read(length) if length else b""
+        self._forward("POST", self.path, body)
+
+    def do_CONNECT(self):
+        """TCP tunnel for HTTPS — announces NOT modified in this mode."""
+        host, _, port_str = self.path.partition(":")
+        port = int(port_str) if port_str.isdigit() else 443
+        try:
+            remote = socket.create_connection((host, port), timeout=10)
+        except OSError as e:
+            self.send_error(502, str(e)); return
+        self.send_response(200, "Connection established")
+        self.end_headers()
+        client = self.connection
+        client.setblocking(False)
+        remote.setblocking(False)
+        try:
+            while True:
+                r, _, _ = select.select([client, remote], [], [], 30)
+                if not r:
+                    break
+                for s in r:
+                    data = s.recv(65536)
+                    if not data:
+                        return
+                    (remote if s is client else client).sendall(data)
+        except OSError:
+            pass
+        finally:
+            remote.close()
+
+# ── SSL cert auto-generation ──────────────────────────────────────────────────
+
+def ensure_cert(certfile, keyfile):
+    if Path(certfile).exists() and Path(keyfile).exists():
+        return True
     try:
-        while True:
-            time.sleep(3600)
+        subprocess.run(
+            ["openssl", "req", "-x509", "-newkey", "rsa:2048",
+             "-keyout", keyfile, "-out", certfile,
+             "-days", "3650", "-nodes", "-subj", "/CN=NewGreedy"],
+            check=True, capture_output=True,
+        )
+        logger.info(f"Self-signed cert generated: {certfile}")
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        logger.warning(f"openssl unavailable: {e}")
+        return False
+
+# ── Update check ──────────────────────────────────────────────────────────────
+
+def check_update():
+    try:
+        r = requests.get(
+            f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest", timeout=5)
+        r.raise_for_status()
+        latest = r.json().get("tag_name", "").lstrip("v")
+        if latest and latest != VERSION:
+            logger.info(f"Update available: v{latest}  (current: v{VERSION})")
+        else:
+            logger.info(f"NewGreedy v{VERSION} is up to date.")
+    except Exception:
+        pass
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+def main():
+    logger.info(f"NewGreedy v{VERSION} starting...")
+    cfg = load_config()
+    if not validate_config(cfg):
+        logger.error("Aborting — fix config errors above.")
+        sys.exit(1)
+
+    threading.Thread(target=check_update, daemon=True, name="ng-update").start()
+
+    stats = StatsManager(cfg)
+    ProxyHandler.stats = stats
+    ProxyHandler.cfg   = cfg
+
+    port = cfg.getint("proxy", "listen_port", fallback=3456)
+    server = HTTPServer(("0.0.0.0", port), ProxyHandler)
+
+    use_https = cfg.getboolean("ssl", "enable_https", fallback=False)
+    if use_https:
+        certfile = cfg.get("ssl", "ssl_certfile", fallback="cert.pem")
+        keyfile  = cfg.get("ssl", "ssl_keyfile",  fallback="key.pem")
+        if cfg.getboolean("ssl", "ssl_autogenerate_cert", fallback=True):
+            ensure_cert(certfile, keyfile)
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        try:
+            ctx.load_cert_chain(certfile, keyfile)
+            server.socket = ctx.wrap_socket(server.socket, server_side=True)
+        except (ssl.SSLError, OSError) as e:
+            logger.error(f"SSL setup failed: {e}"); sys.exit(1)
+        logger.info(f"HTTPS proxy listening on port {port}")
+    else:
+        logger.info(f"HTTP proxy listening on port {port}")
+
+    logger.info(f"Configure qBittorrent: HTTP proxy → 127.0.0.1:{port}")
+    logger.info("Ready.")
+    try:
+        server.serve_forever()
     except KeyboardInterrupt:
-        logging.info("Shutting down...")
-        server.shutdown()
+        logger.info("Shutdown requested.")
+    finally:
         server.server_close()
+        if stats._persist:
+            stats.save_stats()
+        logger.info("Stopped.")
+
+if __name__ == "__main__":
+    main()

@@ -1,218 +1,318 @@
-# NewGreedy v1.0 — mitmproxy addon
-# MrT0t0 - https://github.com/Mrt0t0/NewGreedy/
-#
-# Full HTTP+HTTPS announce interception via mitmproxy SSL inspection.
-# Use when trackers are HTTPS-only.
-#
-# Launch: mitmdump -p 3456 --ssl-insecure -s newgreedy_addon.py
-# Install: sudo ./install.sh --mitmproxy
+"""
+NewGreedy v1.1 — mitmproxy addon
+Full HTTP + HTTPS announce interception with:
+  - User-Agent spoofing (random | fixed | passthrough)
+  - Coherent upload progression (slope guard)
+  - Numpeers / numseeds spoofing
+  - Config validation
+  - Stats persistence
+  - info_hash hex display fix
+"""
 
-import re
-import time
-import random
-import logging
-import threading
+import binascii
 import configparser
-import socket
+import json
+import logging
+import random
+import re
+import sys
+import threading
+import time
 import urllib.parse
-import requests
+from pathlib import Path
+
 from mitmproxy import http
 
-CURRENT_VERSION = "1.0"
+VERSION     = "1.1"
+ANNOUNCE_RE = re.compile(r"/announce", re.IGNORECASE)
 
-# ── Configuration ──────────────────────────────────────────────────────────────
-config = configparser.ConfigParser()
-config.read('config.ini')
+QBIT_USER_AGENTS = [
+    "qBittorrent/5.0.0",
+    "qBittorrent/4.6.7",
+    "qBittorrent/4.6.5",
+    "qBittorrent/4.5.5",
+    "qBittorrent/4.4.5",
+    "Deluge/2.1.1",
+    "Transmission/3.00",
+    "uTorrent/3.6.0",
+]
 
-MAX_MULTIPLIER     = float(config['DEFAULT'].get('max_upload_multiplier', 1.6))
-SEEDING_MULTIPLIER = float(config['DEFAULT'].get('seeding_multiplier', 1.2))
-RANDOM_FACTOR      = float(config['DEFAULT'].get('randomization_factor', 0.25))
-MAX_SPEED_MBPS     = float(config['DEFAULT'].get('max_simulated_speed_mbps', 7.6))
-MAX_SPEED_BPS      = MAX_SPEED_MBPS * 1024 * 1024 / 8
-GLOBAL_RATIO_LIMIT = float(config['DEFAULT'].get('global_ratio_limit', 1.8))
-COOLDOWN_MINUTES   = int(config['DEFAULT'].get('cooldown_duration_minutes', 10))
-LOG_FILE           = config['LOGGING'].get('log_file', 'newgreedy.log')
+KNOWN_CLIENT_PREFIXES = ("qbittorrent", "deluge", "transmission", "utorrent", "libtorrent")
 
-# ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] - %(message)s',
-    handlers=[logging.FileHandler(LOG_FILE), logging.StreamHandler()]
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler("newgreedy.log", encoding="utf-8"),
+        logging.StreamHandler(sys.stdout),
+    ],
 )
+logger = logging.getLogger("newgreedy_addon")
 
-# ── Cooldown state ─────────────────────────────────────────────────────────────
-is_in_cooldown    = False
-cooldown_end_time = 0
-_cooldown_lock    = threading.Lock()
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-# ── Network helpers ────────────────────────────────────────────────────────────
-
-def resolve_host(ip: str) -> str:
+def normalize_info_hash(raw):
+    if not raw:
+        return "unknown"
     try:
-        return socket.gethostbyaddr(ip)[0]
-    except OSError:
-        return ip
+        decoded  = urllib.parse.unquote_to_bytes(raw)
+        hex_hash = binascii.hexlify(decoded).decode("ascii")
+        if len(hex_hash) == 40:
+            return hex_hash
+    except Exception:
+        pass
+    return "".join(c if c.isprintable() and c not in "\r\n" else "?" for c in raw)
 
-# ── GitHub update check ────────────────────────────────────────────────────────
+def resolve_user_agent(mode, ua_value, original_ua):
+    if mode == "passthrough":
+        return original_ua
+    if mode == "fixed":
+        return ua_value if ua_value else random.choice(QBIT_USER_AGENTS)
+    # random
+    if original_ua and any(p in original_ua.lower() for p in KNOWN_CLIENT_PREFIXES):
+        return original_ua
+    return random.choice(QBIT_USER_AGENTS)
 
-def check_for_updates():
+# ── Config ────────────────────────────────────────────────────────────────────
+
+def load_config(path="config.ini"):
+    cfg = configparser.ConfigParser(interpolation=None)
+    cfg.read(path, encoding="utf-8")
+    return cfg
+
+def validate_config(cfg):
+    ok = True
+    def gf(s, k, fb):
+        try: return cfg.getfloat(s, k)
+        except: return fb
+    def gi(s, k, fb):
+        try: return cfg.getint(s, k)
+        except: return fb
     try:
-        r = requests.get(
-            "https://api.github.com/repos/Mrt0t0/NewGreedy/releases/latest",
-            timeout=10
-        )
-        if r.status_code == 404:
-            logging.info("Update check: no releases found.")
-            return
-        r.raise_for_status()
-        latest = r.json().get("tag_name", "").lstrip("v")
-        if latest and float(latest) > float(CURRENT_VERSION):
-            logging.info(f"New version available: v{latest} — https://github.com/Mrt0t0/NewGreedy/releases")
-        else:
-            logging.info("NewGreedy is up to date.")
-    except Exception as e:
-        logging.warning(f"Could not check for updates: {e}")
+        ua_mode = cfg.get("anti_detection", "user_agent_mode", fallback="random").strip().lower()
+    except Exception:
+        ua_mode = "random"
 
-# ── Stats manager ──────────────────────────────────────────────────────────────
+    mul   = gf("multiplier",    "max_upload_multiplier", 1.6)
+    rand  = gf("multiplier",    "randomization_factor",  0.25)
+    rl    = gf("multiplier",    "global_ratio_limit",    1.8)
+    slope = gf("multiplier",    "max_upload_slope",      2.0)
+    pvar  = gf("anti_detection","peer_variance",         0.15)
+    to    = gi("proxy",         "tracker_timeout",       5)
+
+    logger.info("── Config validation (addon) ──────────────────────────")
+    if mul > 5.0:   logger.warning(f"  max_upload_multiplier={mul} > 5.0 — high detection risk")
+    if rand > 0.5:  logger.warning(f"  randomization_factor={rand} > 0.5 — excessive variance")
+    if rl < 0.5:    logger.warning(f"  global_ratio_limit={rl} < 0.5 — cooldown triggers immediately")
+    if slope > 5.0: logger.warning(f"  max_upload_slope={slope} > 5.0 — incoherent progression")
+    if pvar > 0.5:  logger.warning(f"  peer_variance={pvar} > 0.5 — suspicious")
+    if ua_mode not in ("random", "fixed", "passthrough"):
+        logger.warning(f"  user_agent_mode=\"{ua_mode}\" unknown — falling back to random")
+    if to < 1:
+        logger.error(f"  tracker_timeout={to} < 1 — blocking value")
+        ok = False
+    logger.info(f"  multiplier={mul} | slope={slope} | ratio_limit={rl} | ua_mode={ua_mode}")
+    logger.info("── Config OK ────────────────────────────────────────────")
+    return ok
+
+# ── StatsManager ─────────────────────────────────────────────────────────────
 
 class StatsManager:
-    """Thread-safe per-torrent stats store for ratio and speed cap computation."""
+    def __init__(self, cfg):
+        self._lock           = threading.Lock()
+        self._global_ul      = 0.0
+        self._global_dl      = 0.0
+        self._torrents       = {}
+        self._cooldown_until = 0.0
 
-    def __init__(self):
-        self._lock     = threading.Lock()
-        self._torrents = {}
+        def gf(s, k, fb):
+            try: return cfg.getfloat(s, k)
+            except: return fb
+        def gb(s, k, fb):
+            try: return cfg.getboolean(s, k)
+            except: return fb
+        def gs(s, k, fb):
+            try: return cfg.get(s, k, fallback=fb).strip()
+            except: return fb
 
-    def update(self, info_hash, downloaded, uploaded_real, uploaded_reported):
+        self._ratio_limit   = gf("multiplier",    "global_ratio_limit",        1.8)
+        self._cooldown_dur  = gf("multiplier",    "cooldown_duration_minutes", 10.0) * 60
+        self._mul           = gf("multiplier",    "max_upload_multiplier",     1.6)
+        self._seed_mul      = gf("multiplier",    "seeding_multiplier",        1.2)
+        self._rand          = gf("multiplier",    "randomization_factor",      0.25)
+        self._max_speed_bps = gf("multiplier",    "max_simulated_speed_mbps",  7.6) * 1_000_000 / 8
+        self._slope         = gf("multiplier",    "max_upload_slope",          2.0)
+        self._spoof_peers   = gb("anti_detection","spoof_peers",               True)
+        self._peer_variance = gf("anti_detection","peer_variance",             0.15)
+        self._spoof_ua      = gb("anti_detection","spoof_user_agent",          True)
+        self._ua_mode       = gs("anti_detection","user_agent_mode",           "random").lower()
+        self._ua_value      = gs("anti_detection","user_agent_value",          "qBittorrent/4.6.7")
+        self._persist       = gb("stats",         "persist_stats",             True)
+        self._stats_file    = gs("stats",         "stats_file",                "stats.json")
+
+        if self._ua_mode not in ("random", "fixed", "passthrough"):
+            self._ua_mode = "random"
+
+        if self._persist:
+            self._load_stats()
+            threading.Thread(target=self._autosave_loop, daemon=True, name="ng-autosave").start()
+
+    def _load_stats(self):
+        path = Path(self._stats_file)
+        if not path.exists():
+            return
+        try:
+            with path.open(encoding="utf-8") as f:
+                data = json.load(f)
+            self._global_ul      = float(data.get("global_real_uploaded",   0))
+            self._global_dl      = float(data.get("global_real_downloaded", 0))
+            self._torrents       = data.get("torrents", {})
+            self._cooldown_until = float(data.get("cooldown_until", 0))
+            logger.info(f"Stats loaded from {path} ({len(self._torrents)} torrents)")
+        except (json.JSONDecodeError, OSError, ValueError) as e:
+            logger.warning(f"Could not load stats: {e}")
+
+    def save_stats(self):
+        try:
+            with self._lock:
+                payload = {
+                    "version":                VERSION,
+                    "global_real_uploaded":   self._global_ul,
+                    "global_real_downloaded": self._global_dl,
+                    "torrents":               self._torrents,
+                    "cooldown_until":         self._cooldown_until,
+                    "saved_at":               time.strftime("%Y-%m-%dT%H:%M:%S"),
+                }
+            path = Path(self._stats_file)
+            tmp  = path.with_suffix(".tmp")
+            with tmp.open("w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+            tmp.replace(path)
+        except OSError as e:
+            logger.warning(f"Could not save stats: {e}")
+
+    def _autosave_loop(self):
+        while True:
+            time.sleep(60)
+            self.save_stats()
+
+    def compute_reported_upload(self, info_hash, real_ul, real_dl, left, interval=1800.0):
         with self._lock:
-            self._torrents[info_hash] = {
-                'downloaded':        downloaded,
-                'uploaded_real':     uploaded_real,
-                'uploaded_reported':  uploaded_reported,
-                'last_update':       time.monotonic(),
-            }
+            now          = time.time()
+            is_seeding   = (left == 0)
+            display_hash = normalize_info_hash(info_hash)[:8]
 
-    def get(self, info_hash):
-        with self._lock:
-            return dict(self._torrents.get(info_hash, {}))
+            if now < self._cooldown_until:
+                remaining = int(self._cooldown_until - now)
+                logger.info(f"[COOLDOWN]     {display_hash} — {remaining}s remaining")
+                self._store(info_hash, real_ul, real_dl, "COOLDOWN", real_ul)
+                return real_ul
 
-    def global_ratio(self):
-        with self._lock:
-            dl = sum(t['downloaded']        for t in self._torrents.values())
-            ul = sum(t['uploaded_reported'] for t in self._torrents.values())
-        return ul / dl if dl > 0 else 0.0
+            if self._global_dl > 0:
+                ratio = self._global_ul / self._global_dl
+                if ratio >= self._ratio_limit:
+                    self._cooldown_until = now + self._cooldown_dur
+                    logger.info(f"[COOLDOWN TRIGGERED] ratio={ratio:.3f} >= {self._ratio_limit}")
+                    self._store(info_hash, real_ul, real_dl, "COOLDOWN", real_ul)
+                    return real_ul
 
-stats_manager = StatsManager()
+            base = self._seed_mul if is_seeding else self._mul
+            mul  = max(1.0, base + base * self._rand * (random.random() * 2 - 1))
 
-# ── Core multiplier logic (shared with newgreedy.py) ──────────────────────────
+            prev      = self._torrents.get(info_hash, {})
+            prev_rep  = float(prev.get("last_reported_uploaded", 0))
+            prev_dl   = float(prev.get("last_real_downloaded",   0))
+            delta_dl  = max(0.0, real_dl - prev_dl)
+            if delta_dl > 0:
+                max_delta = delta_dl * self._slope
+                if (real_ul * mul - prev_rep) > max_delta:
+                    mul = max(1.0, (prev_rep + max_delta) / max(real_ul, 1))
 
-def compute_reported_upload(info_hash, real_dl, real_ul, left):
-    """
-    Compute the reported upload value applying multiplier, randomization,
-    speed cap, and cooldown. Returns (reported_upload, mode_label).
-    """
-    global is_in_cooldown, cooldown_end_time
+            cap      = prev_rep + self._max_speed_bps * interval
+            reported = int(min(real_ul * mul, cap))
+            reported = max(reported, real_ul)
 
-    now = time.monotonic()
+            mode = "SEEDING" if is_seeding else "DOWNLOADING"
+            self._global_ul += real_ul
+            self._global_dl += real_dl
+            self._store(info_hash, real_ul, real_dl, mode, reported)
 
-    with _cooldown_lock:
-        if is_in_cooldown and now > cooldown_end_time:
-            is_in_cooldown = False
-            logging.info("Cooldown ended. Resuming normal multiplier.")
-
-        if is_in_cooldown:
-            multiplier, mode = 1.0, "COOLDOWN"
-        elif left == 0:
-            multiplier, mode = SEEDING_MULTIPLIER, "SEEDING"
-        else:
-            multiplier, mode = MAX_MULTIPLIER, "DOWNLOADING"
-
-        multiplier *= 1 + random.uniform(-RANDOM_FACTOR, RANDOM_FACTOR)
-
-        if not is_in_cooldown and stats_manager.global_ratio() > GLOBAL_RATIO_LIMIT:
-            is_in_cooldown    = True
-            cooldown_end_time = now + COOLDOWN_MINUTES * 60
-            multiplier, mode  = 1.0, "COOLDOWN"
-            logging.warning(
-                f"Global ratio limit reached ({GLOBAL_RATIO_LIMIT}). "
-                f"Cooldown for {COOLDOWN_MINUTES} minutes."
+            logger.info(
+                f"[{mode:<11}] {display_hash} | "
+                f"DL: {real_dl/1e6:>8.2f} MB | "
+                f"Real UL: {real_ul/1e6:>8.2f} MB | "
+                f"Reported UL: {reported/1e6:>8.2f} MB | "
+                f"Mul: {mul:.3f} | Protocol: HTTPS"
             )
+            return reported
 
-    reported_ul = int(real_dl * multiplier)
+    def _store(self, info_hash, real_ul, real_dl, mode, reported):
+        self._torrents[info_hash] = {
+            "info_hash_hex":          normalize_info_hash(info_hash),
+            "last_real_uploaded":     real_ul,
+            "last_real_downloaded":   real_dl,
+            "last_reported_uploaded": reported,
+            "mode":                   mode,
+            "updated_at":             time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
 
-    prev = stats_manager.get(info_hash)
-    if prev:
-        delta = now - prev.get('last_update', now)
-        if delta > 0:
-            cap         = prev.get('uploaded_reported', 0) + int(MAX_SPEED_BPS * delta)
-            reported_ul = min(reported_ul, cap)
+    def spoof_peers_params(self, params):
+        if not self._spoof_peers:
+            return params
+        for key in ("numwant", "num_peers", "num_seeds", "num_seeders"):
+            if key in params:
+                try:
+                    val = int(params[key])
+                    delta = int(val * self._peer_variance * (random.random() * 2 - 1))
+                    params[key] = str(max(0, val + delta))
+                except (ValueError, TypeError):
+                    pass
+        return params
 
-    stats_manager.update(info_hash, real_dl, real_ul, reported_ul)
-    return reported_ul, mode
+    def get_user_agent(self, original_ua):
+        if not self._spoof_ua:
+            return original_ua
+        return resolve_user_agent(self._ua_mode, self._ua_value, original_ua)
 
-# ── mitmproxy Addon ────────────────────────────────────────────────────────────
+# ── mitmproxy Addon ───────────────────────────────────────────────────────────
+
+cfg   = load_config()
+ok    = validate_config(cfg)
+if not ok:
+    logger.error("Config validation failed — addon loaded with errors.")
+
+stats = StatsManager(cfg)
+
 
 class NewGreedyAddon:
-    """
-    mitmproxy addon intercepting BitTorrent tracker announce requests
-    over both HTTP and HTTPS via SSL inspection.
-    Rewrites the 'uploaded' query parameter before the request reaches the tracker.
-    """
-
-    _RE_UPLOADED   = re.compile(r'uploaded=(\d+)')
-    _RE_DOWNLOADED = re.compile(r'downloaded=(\d+)')
-    _RE_INFO_HASH  = re.compile(r'info_hash=([^&]+)')
-    _RE_LEFT       = re.compile(r'left=(\d+)')
-    _RE_PEER_IP    = re.compile(r'ip=([\d\.]+)')
-
-    def __init__(self):
-        logging.info(f"--- Starting NewGreedy v{CURRENT_VERSION} (mitmproxy mode) --- MrT0t0 ---")
-        logging.info(
-            f"Multiplier: {MAX_MULTIPLIER}x | Seeding: {SEEDING_MULTIPLIER}x | "
-            f"Random: ±{int(RANDOM_FACTOR * 100)}% | "
-            f"Speed cap: {MAX_SPEED_MBPS} Mbps | "
-            f"Ratio limit: {GLOBAL_RATIO_LIMIT}"
-        )
-        threading.Thread(target=check_for_updates, daemon=True).start()
-
     def request(self, flow: http.HTTPFlow) -> None:
-        """
-        Called for every intercepted request (HTTP and HTTPS).
-        Identifies tracker announces and rewrites 'uploaded' in-place.
-        """
-        url        = flow.request.pretty_url
-        ul_match   = self._RE_UPLOADED.search(url)
-        dl_match   = self._RE_DOWNLOADED.search(url)
-        hash_match = self._RE_INFO_HASH.search(url)
-
-        if not (ul_match and dl_match and hash_match):
+        url    = flow.request.pretty_url
+        parsed = urllib.parse.urlparse(url)
+        if not ANNOUNCE_RE.search(parsed.path):
             return
 
+        params    = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
+        info_hash = params.get("info_hash", "")
         try:
-            info_hash  = urllib.parse.unquote(hash_match.group(1))
-            real_dl    = int(dl_match.group(1))
-            real_ul    = int(ul_match.group(1))
+            real_ul = int(params.get("uploaded",   0))
+            real_dl = int(params.get("downloaded", 0))
+            left    = int(params.get("left",       1))
+        except (ValueError, TypeError):
+            return
 
-            left_match = self._RE_LEFT.search(url)
-            left       = int(left_match.group(1)) if left_match else 1
+        reported           = stats.compute_reported_upload(info_hash, real_ul, real_dl, left)
+        params["uploaded"] = str(reported)
+        params             = stats.spoof_peers_params(params)
 
-            ip_match = self._RE_PEER_IP.search(url)
-            label    = resolve_host(ip_match.group(1)) if ip_match else info_hash[:10]
+        flow.request.query = urllib.parse.urlencode(params)
 
-            reported_ul, mode = compute_reported_upload(info_hash, real_dl, real_ul, left)
+        original_ua = flow.request.headers.get("User-Agent", "")
+        flow.request.headers["User-Agent"] = stats.get_user_agent(original_ua)
 
-            logging.info(
-                f"[{mode}] {label} | "
-                f"DL: {real_dl / 1_048_576:.2f} MB | "
-                f"Real UL: {real_ul / 1_048_576:.2f} MB | "
-                f"Reported UL: {reported_ul / 1_048_576:.2f} MB | "
-                f"Protocol: {flow.request.scheme.upper()}"
-            )
 
-            # Rewrite uploaded directly in the mitmproxy query MultiDict
-            flow.request.query['uploaded'] = str(reported_ul)
-
-        except Exception as e:
-            logging.error(f"Addon error: {e}", exc_info=True)
+def start():
+    logger.info(f"NewGreedy v{VERSION} addon loaded (mitmproxy mode).")
+    logger.info("Intercepting HTTP + HTTPS announce requests.")
 
 
 addons = [NewGreedyAddon()]

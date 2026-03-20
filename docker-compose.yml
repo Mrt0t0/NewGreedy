@@ -1,0 +1,35 @@
+# docker-compose.yml — NewGreedy v1.1
+# Standard mode  : docker compose up
+# mitmproxy mode : override CMD in docker-compose.override.yml
+
+version: "3.9"
+
+services:
+  newgreedy:
+    build: .
+    container_name: newgreedy
+    restart: unless-stopped
+    ports:
+      - "3456:3456"       # proxy
+    volumes:
+      - ./data:/app/data  # stats.json + newgreedy.log persistence
+      - ./config.ini:/app/config.ini:ro
+    # Uncomment for mitmproxy mode:
+    # command: ["--mitmproxy"]
+
+  # ── mitmproxy mode (HTTPS trackers) ────────────────────────────────────────
+  # newgreedy-mitm:
+  #   build: .
+  #   container_name: newgreedy-mitm
+  #   restart: unless-stopped
+  #   command: ["--mitmproxy"]
+  #   ports:
+  #     - "3456:3456"
+  #     - "8080:8080"      # mitmproxy web UI (optional)
+  #   volumes:
+  #     - ./data:/app/data
+  #     - ./config.ini:/app/config.ini:ro
+  #     - mitmproxy_ca:/root/.mitmproxy
+
+volumes:
+  mitmproxy_ca:
