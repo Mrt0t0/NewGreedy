@@ -28,12 +28,13 @@ def normalize_info_hash(raw):
     if not raw:
         return "unknown"
     try:
-        h = binascii.hexlify(urllib.parse.unquote_to_bytes(raw)).decode("ascii")
+        raw_bytes = raw.encode("latin-1") if isinstance(raw, str) else raw
+        h = binascii.hexlify(raw_bytes).decode("ascii")
         if len(h) == 40:
             return h
     except Exception:
         pass
-    return "".join(c if c.isprintable() and c not in "\r\n" else "?" for c in raw)
+    return "".join(c if c.isprintable() and c not in "\r\n" else "?" for c in str(raw))
 
 def resolve_ua(mode, ua_value, original_ua):
     if mode == "passthrough":
@@ -43,6 +44,31 @@ def resolve_ua(mode, ua_value, original_ua):
     if original_ua and any(p in original_ua.lower() for p in KNOWN_CLIENT_PREFIXES):
         return original_ua
     return random.choice(QBIT_USER_AGENTS)
+
+def rewrite_query_safe(path, new_uploaded, peer_var=0.0):
+    """Modify ONLY uploaded + peer params — NEVER re-encodes info_hash."""
+    if "?" not in path:
+        return path
+    base, _, query = path.partition("?")
+    if re.search(r'(^|&)uploaded=[^&]*', query):
+        query = re.sub(
+            r'(^|&)(uploaded=)[^&]*',
+            lambda m: m.group(1) + "uploaded=" + str(new_uploaded),
+            query
+        )
+    else:
+        query += "&uploaded=" + str(new_uploaded)
+    if peer_var > 0:
+        for key in ("numwant", "num_peers", "num_seeds", "num_seeders"):
+            def replace_peer(m, k=key):
+                try:
+                    v = int(m.group(3))
+                    delta = int(v * peer_var * (random.random() * 2 - 1))
+                    return m.group(1) + k + "=" + str(max(0, v + delta))
+                except Exception:
+                    return m.group(0)
+            query = re.sub(rf'(^|&)({re.escape(key)}=)([^&]*)', replace_peer, query)
+    return base + "?" + query
 
 def load_config(path="config.ini"):
     cfg = configparser.ConfigParser(interpolation=None)
@@ -170,8 +196,7 @@ class StatsManager:
             self._store(info_hash, real_ul, real_dl, mode, reported)
             logger.info(f"[{mode:<11}] {dhash} | DL:{real_dl/1e6:>8.2f}MB | "
                         f"Real UL:{real_ul/1e6:>8.2f}MB | "
-                        f"Reported UL:{reported/1e6:>8.2f}MB | "
-                        f"Mul:{mul:.3f} | Protocol:HTTPS")
+                        f"Reported UL:{reported/1e6:>8.2f}MB | Mul:{mul:.3f}")
             return reported
 
     def _store(self, info_hash, real_ul, real_dl, mode, reported):
@@ -184,20 +209,13 @@ class StatsManager:
             "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         }
 
-    def spoof_peers(self, params):
-        if not self._spoof_peers:
-            return params
-        for k in ("numwant", "num_peers", "num_seeds", "num_seeders"):
-            if k in params:
-                try:
-                    v = int(params[k])
-                    params[k] = str(max(0, v + int(v * self._peer_var * (random.random()*2-1))))
-                except (ValueError, TypeError):
-                    pass
-        return params
-
     def get_ua(self, original):
         return resolve_ua(self._ua_mode, self._ua_value, original) if self._spoof_ua else original
+
+    @property
+    def peer_var(self): return self._peer_var
+    @property
+    def spoof_peers_enabled(self): return self._spoof_peers
 
 cfg   = load_config()
 ok    = validate_config(cfg)
@@ -207,17 +225,17 @@ stats = StatsManager(cfg)
 
 class NewGreedyAddon:
     def request(self, flow: http.HTTPFlow) -> None:
-        parsed = urllib.parse.urlparse(flow.request.pretty_url)
-        if not ANNOUNCE_RE.search(parsed.path):
+        path = flow.request.path
+        if not ANNOUNCE_RE.search(path):
             return
-        if not parsed.query:
+        if "?" not in path:
             return
+        _, _, raw_query = path.partition("?")
         try:
             params = dict(urllib.parse.parse_qsl(
-                parsed.query, keep_blank_values=True, encoding="latin-1"
+                raw_query, keep_blank_values=True, encoding="latin-1"
             ))
-        except Exception as e:
-            logger.warning(f"Could not parse query: {e}")
+        except Exception:
             return
         info_hash = params.get("info_hash", "")
         if not info_hash:
@@ -228,12 +246,9 @@ class NewGreedyAddon:
             left    = int(params.get("left",       1))
         except (ValueError, TypeError):
             return
-        reported           = stats.compute_reported_upload(info_hash, real_ul, real_dl, left)
-        params["uploaded"] = str(reported)
-        params             = stats.spoof_peers(params)
-        clean = {k: v if isinstance(v, str) else v.encode("latin-1").decode("latin-1")
-                 for k, v in params.items()}
-        flow.request.query = list(clean.items())
+        reported = stats.compute_reported_upload(info_hash, real_ul, real_dl, left)
+        peer_var = stats.peer_var if stats.spoof_peers_enabled else 0.0
+        flow.request.path = rewrite_query_safe(path, reported, peer_var)
         flow.request.headers["User-Agent"] = stats.get_ua(
             flow.request.headers.get("User-Agent", "")
         )
