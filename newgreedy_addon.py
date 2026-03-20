@@ -210,10 +210,18 @@ class NewGreedyAddon:
         parsed = urllib.parse.urlparse(flow.request.pretty_url)
         if not ANNOUNCE_RE.search(parsed.path):
             return
-        params = dict(urllib.parse.parse_qsl(
-            parsed.query, keep_blank_values=True, encoding="latin-1"
-        ))
+        if not parsed.query:
+            return
+        try:
+            params = dict(urllib.parse.parse_qsl(
+                parsed.query, keep_blank_values=True, encoding="latin-1"
+            ))
+        except Exception as e:
+            logger.warning(f"Could not parse query: {e}")
+            return
         info_hash = params.get("info_hash", "")
+        if not info_hash:
+            return
         try:
             real_ul = int(params.get("uploaded",   0))
             real_dl = int(params.get("downloaded", 0))
