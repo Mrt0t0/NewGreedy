@@ -234,4 +234,3 @@ def start():
     logger.info(f"NewGreedy v{VERSION} addon loaded — intercepting HTTP+HTTPS announces.")
 
 addons = [NewGreedyAddon()]
-EOF
