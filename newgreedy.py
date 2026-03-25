@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""
-NewGreedy v1.3
+"""NewGreedy v1.3
 Launcher -- starts mitmproxy on a single port (HTTP + HTTPS).
 All logic lives in newgreedy_addon.py.
 """
 
-import configparser, logging, os, signal, subprocess, sys
+import configparser, os, signal, subprocess, sys
+import logging
 from pathlib import Path
 
 VERSION     = "1.3"
@@ -14,15 +14,19 @@ CONFIG      = Path(__file__).parent / "config.ini"
 LOG_FILE    = Path(__file__).parent / "newgreedy.log"
 GITHUB_REPO = "Mrt0t0/NewGreedy"
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
+# Single named logger -- no propagation to root
+logging.getLogger().setLevel(logging.WARNING)
+logger = logging.getLogger("newgreedy")
+if not logger.handlers:
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    _fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    for _h in (
         logging.FileHandler(LOG_FILE, encoding="utf-8"),
         logging.StreamHandler(sys.stdout),
-    ],
-)
-logger = logging.getLogger("newgreedy")
+    ):
+        _h.setFormatter(_fmt)
+        logger.addHandler(_h)
 
 
 def load_port():
@@ -39,8 +43,19 @@ def check_update():
             timeout=5,
         )
         latest = r.json().get("tag_name", "").lstrip("v")
-        if latest and latest != VERSION:
-            logger.info("New version available: v%s  (run update.sh to upgrade)", latest)
+        if not latest:
+            return
+
+        def ver(s):
+            try:
+                return tuple(int(x) for x in s.split("."))
+            except Exception:
+                return (0,)
+
+        if ver(latest) > ver(VERSION):
+            logger.info(
+                "New version available: v%s  (run: sudo ./install.sh --update)", latest
+            )
         else:
             logger.info("NewGreedy v%s is up to date.", VERSION)
     except Exception:
@@ -60,34 +75,31 @@ def main():
     import threading
     threading.Thread(target=check_update, daemon=True).start()
 
-    cmd = [
-        sys.executable, "-m", "mitmproxy.tools.main",
-        "--mode",         "regular",
-        "--listen-host",  "0.0.0.0",
-        "--listen-port",  str(port),
-        "--scripts",      str(ADDON),
-        "--set",          "block_global=false",
-        "--set",          "ssl_insecure=false",
-        "--quiet",
-    ]
+    import shutil
+    mitmdump = shutil.which("mitmdump")
 
-    # Prefer mitmdump (no UI) when available
-    try:
-        import shutil
-        mitmdump = shutil.which("mitmdump")
-        if mitmdump:
-            cmd = [
-                mitmdump,
-                "--mode",         "regular",
-                "--listen-host",  "0.0.0.0",
-                "--listen-port",  str(port),
-                "--scripts",      str(ADDON),
-                "--set",          "block_global=false",
-                "--set",          "ssl_insecure=false",
-                "--quiet",
-            ]
-    except Exception:
-        pass
+    if mitmdump:
+        cmd = [
+            mitmdump,
+            "--mode",        "regular",
+            "--listen-host", "0.0.0.0",
+            "--listen-port", str(port),
+            "--scripts",     str(ADDON),
+            "--set",         "block_global=false",
+            "--set",         "ssl_insecure=false",
+            "--quiet",
+        ]
+    else:
+        cmd = [
+            sys.executable, "-m", "mitmproxy.tools.main",
+            "--mode",        "regular",
+            "--listen-host", "0.0.0.0",
+            "--listen-port", str(port),
+            "--scripts",     str(ADDON),
+            "--set",         "block_global=false",
+            "--set",         "ssl_insecure=false",
+            "--quiet",
+        ]
 
     try:
         proc = subprocess.run(cmd)
@@ -95,9 +107,7 @@ def main():
     except KeyboardInterrupt:
         logger.info("Shutdown requested.")
     except FileNotFoundError:
-        logger.error(
-            "mitmproxy not found. Install it with:  pip install mitmproxy"
-        )
+        logger.error("mitmproxy not found. Install it with:  pip install mitmproxy")
         sys.exit(1)
 
 
