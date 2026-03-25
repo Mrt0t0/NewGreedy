@@ -267,38 +267,168 @@ certutil -addstore -f ROOT mitmproxy-ca.pem
 <summary><strong>Full config reference (click to expand)</strong></summary>
 
 ```ini
+; ------------------------------------------------------------
 [proxy]
+; ------------------------------------------------------------
+
+; Port that NewGreedy (mitmproxy) listens on.
+; Configure this same value in your torrent client proxy settings.
+; Both HTTP and HTTPS tracker announces are handled on this single port.
 listen_port               = 3456
+
+; Timeout in seconds when forwarding an announce to the real tracker.
+; Increase if your tracker is slow to respond.
 tracker_timeout           = 5
 
+; ------------------------------------------------------------
 [spoofing]
-upload_mode               = ratio_based   ; ratio_based | multiplier
+; ------------------------------------------------------------
+
+; Upload reporting mode.
+;   ratio_based  ->  reported_ul = total_downloaded x target_ratio  (recommended)
+;                    Works even if your real upload is 0 MB.
+;   multiplier   ->  reported_ul = real_ul x a multiplier  (v1.2 compat)
+;                    If real_ul = 0, reported_ul = 0. Not recommended.
+upload_mode               = ratio_based
+
+; [ratio_based only]
+; Target ratio to maintain per torrent.
+; Example: 1.5 means NewGreedy will report 1500 MB uploaded for every 1000 MB downloaded.
+; Typical private tracker minimum: 1.0. Recommended: 1.2 to 2.0.
+; Accepted range: 1.0 to 5.0
 target_ratio              = 1.5
+
+; [ratio_based only]
+; Hard cap per torrent. Once the reported ratio reaches this value,
+; NewGreedy stops boosting and only reports the real upload.
+; Prevents suspiciously high ratios (e.g. 10.0) on low-traffic torrents.
 max_ratio_per_torrent     = 3.0
-seed_credit_mb            = 5.0
+
+; [ratio_based only]
+; How fast NewGreedy catches up to the target ratio.
+; Each announce closes this fraction of the remaining gap.
+;   0.15  ->  closes 15% of the gap per announce  (~30 announces to reach target)
+;   0.30  ->  closes 30% of the gap per announce  (~15 announces to reach target)
+; Lower = more gradual and natural. Higher = faster but more suspicious.
+; Recommended: 0.10 to 0.25
 catch_up_factor           = 0.15
-max_simulated_speed_mbps  = 10.0
-upload_noise_pct          = 3.0
+
+; [ratio_based only]
+; MB of upload to report per announce when the torrent has no download reference
+; (pure seeder: left=0 and real downloaded=0, e.g. file already on disk).
+; The actual value is randomized using a triangular distribution (x0.4 to x1.8)
+; so it is never the same twice.
+; Set to 0 to disable seed credit entirely.
+seed_credit_mb            = 5.0
+
+; [ratio_based only]
+; When the torrent is in SEEDING mode and real downloaded=0,
+; NewGreedy injects a fake "downloaded" value into the announce.
+; reported_downloaded = reported_ul x seeding_dl_ratio
+; This prevents the tracker from seeing a 0/0 ratio which can be suspicious.
+; Set to 0.0 to disable downloaded injection.
 seeding_dl_ratio          = 0.85
 
+; Maximum simulated upload speed in MB/s.
+; NewGreedy will never report more upload than:
+;   max_simulated_speed_mbps x announce_interval  (seconds)
+; Example: 10.0 MB/s x 1800s = 18000 MB max per announce.
+; Prevents impossible values (e.g. 100 GB uploaded in 30 minutes).
+; Set to your real upload speed or slightly above.
+max_simulated_speed_mbps  = 10.0
+
+; Gaussian noise added to the final reported upload value (+/- this %).
+; Makes the reported upload look like a real client with slight variations.
+; Also applied as variance on the effective target_ratio itself.
+; Recommended: 2.0 to 5.0. Set to 0 to disable.
+upload_noise_pct          = 3.0
+
+; ------------------------------------------------------------
 [anti_detection]
+; ------------------------------------------------------------
+
+; How to set the User-Agent header sent to the tracker.
+;   random       ->  picks a realistic torrent client UA on each announce
+;   fixed        ->  always uses the value defined in user_agent_value
+;   passthrough  ->  forwards the original UA from your torrent client
 user_agent_mode           = random
+
+; [user_agent_mode = fixed only]
+; The exact User-Agent string to send.
+; Must match a real torrent client version to avoid detection.
 user_agent_value          = qBittorrent/4.6.7
+
+; Generate a peer_id consistent with the spoofed User-Agent.
+; A mismatched peer_id and UA is a common detection vector.
+; Recommended: true
 spoof_peer_id             = true
+
+; Randomize numwant / num_peers / num_seeds in the announce query.
+; Adds natural variation to peer count values.
 spoof_peers               = true
+
+; +/- variation applied to peer count values (0.15 = +/-15%).
 peer_variance             = 0.15
+
+; Randomize the port announced to the tracker.
+; Your real listening port is never exposed. A random port from port_range is used.
 spoof_port                = true
+
+; Range of ports to pick from when spoof_port = true.
+; Should match a typical torrent client range.
 port_range                = 6881-6999
+
+; Remove proxy-revealing HTTP headers (X-Forwarded-For, Via, etc.)
+; and replace with realistic torrent client headers.
+; Recommended: true
 spoof_headers             = true
+
+; Intercept /scrape requests and patch the response to stay consistent
+; with the spoofed upload values. Prevents ratio discrepancies on trackers
+; that cross-check announce and scrape data.
 intercept_scrape          = true
+
+; Only spoof announces to trackers matching these domains (comma-separated).
+; Leave empty to spoof all trackers.
+; Example: tracker.mysite.org, private.tracker.net
 tracker_whitelist         =
+
+; Never spoof announces to trackers matching these domains (comma-separated).
+; Takes precedence over tracker_whitelist.
+; Example: tracker.opentrackr.org, open.tracker.cl
 tracker_blacklist         =
 
+; ------------------------------------------------------------
+[ssl]
+; ------------------------------------------------------------
+
+; Verify SSL certificates when NewGreedy connects to the tracker.
+; true   ->  standard SSL verification (recommended)
+; false  ->  skip verification (use only if a tracker has a self-signed
+;            or expired certificate and you see SSL errors in the logs)
+ssl_verify_trackers       = true
+
+; ------------------------------------------------------------
 [stats]
+; ------------------------------------------------------------
+
+; Save per-torrent stats (cumulated DL, reported UL, ratio, announce count)
+; to a JSON file. Stats are restored on restart so the ratio is never reset.
+; Set to false to disable persistence (stats reset on every restart).
 persist_stats             = true
+
+; Path to the stats file (relative to the install directory, or absolute).
 stats_file                = stats.json
 
+; ------------------------------------------------------------
 [advanced]
+; ------------------------------------------------------------
+
+; Minimum interval (seconds) between two announces to the same tracker.
+; NewGreedy ignores announces that arrive sooner than 90% of this value.
+; The tracker itself sends its preferred interval in the announce response
+; (that value takes precedence at runtime).
+; Default matches the BitTorrent standard (1800s = 30 minutes).
 min_announce_interval     = 1800
 ```
 
