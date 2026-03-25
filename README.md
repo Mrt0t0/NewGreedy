@@ -43,25 +43,18 @@ Your client         NewGreedy :3456 (HTTP + HTTPS)       Tracker
 ## :gear: How the calculation works
 
 ```
-total_downloaded  (cumulated)
-        |
-        x target_ratio  (+ Gaussian variance)
-        |
-        = target_ul_total
-        |
-        - already_reported
-        |
-        = delta_needed
-        |
-        x catch_up_factor (default 15%)     <- gradual ramp, no spike
-        |
-        min(result, max_speed_mbps x interval)  <- speed cap
-        max(result, real_ul)                    <- never below real
-        +/- Gaussian noise (upload_noise_pct)   <- natural variation
-        |
-        if per-torrent ratio >= max_ratio: reported = real_ul
-        |
-        -----> sent to tracker
+downloaded (per torrent, cumulative)
+     │
+     ├─ target_ratio (randomized 1.42–1.54)
+     ├─ non-linear progression (exponential decay with announce count)
+     ├─ catch_up_factor (fraction of delta applied this announce)
+     ├─ capped by max_simulated_speed_mbps × interval
+     ├─ capped by max_ratio_per_torrent
+     ├─ 15% stagnation announces (no boost)
+     └─ ± Gaussian noise (upload_noise_pct)
+          │
+          ▼
+  reported_uploaded ──► sent to tracker
 ```
 
 ---
@@ -518,7 +511,24 @@ event_anomaly_probability = 0.03
 
 ## :memo: Changelog
 
-### v1.3 -- Current
+### v1.4 -- Current
+- **Anti-clustering ratio**: `target_ratio = 1.5` auto-randomized to **1.42–1.54** on first run
+- **Stagnation simulation**: 15% of announces report no extra credit (`stagnation_probability`)
+- **Exponential decay**: upload credit is heavier early in seeding, tapers naturally with announce count
+- **Simulated downloaded**: per-torrent session value, no longer derived from `uploaded × fixed ratio`
+- **peer_id rotation** every 4–6h instead of fixed per session
+- **UA-specific HTTP headers**: header sets vary per client family (qBittorrent / Deluge / Transmission)
+- **Multi-tracker desync**: random 0.5–8s delay between duplicate announces across trackers
+- **Event anomalies**: ~3% spontaneous `event=stopped` + `event=started` to simulate reconnects
+- **Detectability score**: per-announce suspicion score (0–10) logged at `DEBUG` level
+- New config keys: `anti_clustering`, `stagnation_probability`, `log_level`, `multi_tracker_delay_min/max`, `event_anomaly_probability`
+- Added: `install.ps1` Windows installer (Task Scheduler + `certutil` CA + `-Update` flag)
+- Fix: duplicate multi-tracker announces no longer accumulate double credit
+- Fix: `SeedUL` label only shown for pure seeders (`DL=0`, `left=0`)
+- Fix: double logging removed (stdout only, no stale `FileHandler`)
+- Fix: `peer_id` now correctly rotated on `SIGHUP` hot-reload
+
+### v1.3
 - **Single port 3456** for HTTP and HTTPS (mitmproxy now required)
 - New `ratio_based` mode: `reported_ul = total_downloaded x target_ratio`
 - Upload reported even when `real_ul = 0`
