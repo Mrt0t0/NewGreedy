@@ -303,7 +303,7 @@ class StatsManager:
             new_rep = cumul_rep_ul + reported
 
             # Ratio: meaningful only when cumul_dl > 0
-            # Pure seeder (DL=0): show total seed credit reported instead
+            # For pure seeders (DL=0), display total seed credit instead
             if cumul_dl > 0:
                 ratio_t   = new_rep / cumul_dl
                 ratio_str = "Ratio:%.3f    " % ratio_t

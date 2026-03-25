@@ -28,7 +28,6 @@ if not logger.handlers:
         _h.setFormatter(_fmt)
         logger.addHandler(_h)
 
-
 def load_port():
     cfg = configparser.ConfigParser(interpolation=None)
     cfg.read(CONFIG, encoding="utf-8")
