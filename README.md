@@ -256,10 +256,6 @@ certutil -addstore -f ROOT mitmproxy-ca.pem
 | Windows | `%LOCALAPPDATA%\NewGreedy\config.ini` |
 | Docker | `./config.ini` (if mounted) |
 
-<details>
-<summary><strong>Full config reference (click to expand)</strong></summary>
-
-```ini
 ; ------------------------------------------------------------
 [proxy]
 ; ------------------------------------------------------------
@@ -456,8 +452,6 @@ multi_tracker_delay_max   = 8.0
 ; Simulates reconnects to explain ratio jumps and peer count changes naturally.
 ; Recommended: 0.02 to 0.05
 event_anomaly_probability = 0.03
-
-</details>
 
 ---
 
