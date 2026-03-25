@@ -1,6 +1,7 @@
 """
 NewGreedy v1.3 - mitmproxy addon
 Intercepts HTTP and HTTPS tracker announces on a single port.
+UDP tracker announces are passed through without modification.
 """
 
 import binascii, configparser, json, logging, random, re
@@ -34,18 +35,19 @@ _LOG_FILE = _BASE_DIR / "newgreedy.log"
 
 
 def _setup_logging():
+    """Single named logger, stdout only.
+    systemd writes stdout to the log file via StandardOutput=append:
+    Using a FileHandler here would cause every line to appear twice.
+    """
     log = logging.getLogger("newgreedy")
     if log.handlers:
         return log
     log.setLevel(logging.INFO)
-    log.propagate = False          # never bubble up to root logger
+    log.propagate = False
     fmt = logging.Formatter("[%(asctime)s] %(message)s", "%H:%M:%S")
-    for h in (
-        logging.FileHandler(_LOG_FILE, encoding="utf-8"),
-        logging.StreamHandler(sys.stdout),
-    ):
-        h.setFormatter(fmt)
-        log.addHandler(h)
+    h = logging.StreamHandler(sys.stdout)
+    h.setFormatter(fmt)
+    log.addHandler(h)
     return log
 
 logger = _setup_logging()
@@ -299,7 +301,15 @@ class StatsManager:
                 rep_dl = apply_noise(int(reported * self._dl_ratio), self._noise_pct)
 
             new_rep = cumul_rep_ul + reported
-            ratio_t = new_rep / cumul_dl if cumul_dl > 0 else 0.0
+
+            # Ratio: meaningful only when cumul_dl > 0
+            # Pure seeder (DL=0): show total seed credit reported instead
+            if cumul_dl > 0:
+                ratio_t   = new_rep / cumul_dl
+                ratio_str = "Ratio:%.3f    " % ratio_t
+            else:
+                ratio_t   = 0.0
+                ratio_str = "SeedUL:%7.2fMB" % (new_rep / 1e6)
 
             self._torrents[info_hash] = {
                 "info_hash_hex":  normalize_info_hash(info_hash),
@@ -312,9 +322,9 @@ class StatsManager:
             }
 
             logger.info(
-                "[%-11s] %s | DL:%8.2fMB | RealUL:%8.2fMB | RepUL:%8.2fMB | Ratio:%.3f | Ann#%d",
+                "[%-11s] %s | DL:%8.2fMB | RealUL:%8.2fMB | RepUL:%8.2fMB | %s | Ann#%d",
                 "SEEDING" if is_seed else "DOWNLOADING", dhash,
-                real_dl / 1e6, real_ul / 1e6, reported / 1e6, ratio_t, ann_cnt,
+                real_dl / 1e6, real_ul / 1e6, reported / 1e6, ratio_str, ann_cnt,
             )
             return reported, rep_dl
 
@@ -325,7 +335,7 @@ class StatsManager:
             delta = max(0.0, cumul_dl * eff - cumul_rep_ul)
             rep   = min(int(delta * self._catch_up), int(self._max_speed_bps * interval))
             rep   = max(rep, real_ul)
-            if cumul_dl > 0 and (cumul_rep_ul + rep) / cumul_dl >= self._max_ratio:
+            if (cumul_rep_ul + rep) / cumul_dl >= self._max_ratio:
                 rep = real_ul
         elif is_seed:
             lo  = int(self._seed_credit * 0.4)
@@ -371,6 +381,12 @@ _guard  = IntervalGuard(_cfg.getint("advanced", "min_announce_interval", fallbac
 class NewGreedyAddon:
 
     def request(self, flow: http.HTTPFlow):
+        """
+        Called for every HTTP/HTTPS request intercepted by mitmproxy.
+        UDP tracker announces bypass mitmproxy entirely -- they are not
+        handled here and pass through to the tracker without modification.
+        Only HTTP/HTTPS /announce requests are rewritten.
+        """
         path = flow.request.path
         host = flow.request.pretty_host
 
