@@ -40,18 +40,6 @@ Your client         NewGreedy :3456 (HTTP + HTTPS)       Tracker
 
 ---
 
-## :sparkles: v1.3 -- Key changes
-
-| | v1.2 | v1.3 |
-|---|---|---|
-| Reported upload based on | Real upload x multiplier | **Downloaded x target_ratio** |
-| Real upload = 0 | Reported upload = 0 | **Reported upload continues** |
-| Pure seeder credit | Fixed value | **Triangular random (x0.4 to x1.8)** |
-| Catch-up | Logistic S-curve | **catch_up_factor (15%/announce)** |
-| Ratio cap | Global cooldown | **Per-torrent hard cap** |
-
----
-
 ## :gear: How the calculation works
 
 ```
