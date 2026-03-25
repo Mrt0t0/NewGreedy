@@ -1,7 +1,5 @@
 """
 NewGreedy v1.3 - mitmproxy addon
-Intercepts HTTP and HTTPS tracker announces on a single port.
-UDP tracker announces are passed through without modification.
 """
 
 import binascii, configparser, json, logging, random, re
@@ -37,7 +35,7 @@ _LOG_FILE = _BASE_DIR / "newgreedy.log"
 def _setup_logging():
     """Single named logger, stdout only.
     systemd writes stdout to the log file via StandardOutput=append:
-    Using a FileHandler here would cause every line to appear twice.
+    A FileHandler here would cause every line to appear twice.
     """
     log = logging.getLogger("newgreedy")
     if log.handlers:
@@ -191,9 +189,10 @@ class IntervalGuard:
 class StatsManager:
 
     def __init__(self, cfg):
-        self._lock     = threading.Lock()
-        self._torrents = {}
-        self._cfg_path = str(_BASE_DIR / "config.ini")
+        self._lock            = threading.Lock()
+        self._torrents        = {}
+        self._last_accumulate = {}   # {info_hash: timestamp} -- dedup multi-tracker
+        self._cfg_path        = str(_BASE_DIR / "config.ini")
         self._load_cfg(cfg)
         if self._persist:
             self._load_stats()
@@ -290,26 +289,47 @@ class StatsManager:
             cumul_dl     = float(prev.get("cumul_dl",     0)) + real_dl
             cumul_rep_ul = float(prev.get("cumul_rep_ul", 0))
 
-            if self._upload_mode == "ratio_based":
-                reported = self._ratio_based(real_ul, is_seed, cumul_dl, cumul_rep_ul, interval)
-            else:
-                mul      = max(1.0, random.gauss(1.4, 0.15))
-                reported = max(apply_noise(int(real_ul * mul), self._noise_pct), real_ul)
+            # Deduplicate multi-tracker announces for the same torrent.
+            # A torrent with 3 HTTP trackers fires 3 announces within seconds.
+            # Only the first one in a 10s window accumulates credit;
+            # the others are forwarded as-is (reported=0 delta).
+            now       = time.time()
+            duplicate = (now - self._last_accumulate.get(info_hash, 0)) < 10.0
 
-            rep_dl = real_dl
-            if is_seed and real_dl == 0 and reported > 0 and self._dl_ratio > 0:
-                rep_dl = apply_noise(int(reported * self._dl_ratio), self._noise_pct)
+            if duplicate:
+                reported = 0
+                rep_dl   = real_dl
+            else:
+                self._last_accumulate[info_hash] = now
+                if self._upload_mode == "ratio_based":
+                    reported = self._ratio_based(
+                        real_ul, is_seed, cumul_dl, cumul_rep_ul, interval
+                    )
+                else:
+                    mul      = max(1.0, random.gauss(1.4, 0.15))
+                    reported = max(apply_noise(int(real_ul * mul), self._noise_pct), real_ul)
+
+                rep_dl = real_dl
+                if is_seed and real_dl == 0 and reported > 0 and self._dl_ratio > 0:
+                    rep_dl = apply_noise(int(reported * self._dl_ratio), self._noise_pct)
 
             new_rep = cumul_rep_ul + reported
 
-            # Ratio: meaningful only when cumul_dl > 0
-            # For pure seeders (DL=0), display total seed credit instead
+            # Display logic:
+            # cumul_dl > 0              -> Ratio
+            # cumul_dl = 0 + SEEDING    -> SeedUL (pure seeder, file already on disk)
+            # cumul_dl = 0 + DOWNLOADING -> Ratio:0.000 (first announce, no DL yet)
             if cumul_dl > 0:
                 ratio_t   = new_rep / cumul_dl
                 ratio_str = "Ratio:%.3f    " % ratio_t
-            else:
+            elif is_seed:
                 ratio_t   = 0.0
                 ratio_str = "SeedUL:%7.2fMB" % (new_rep / 1e6)
+            else:
+                ratio_t   = 0.0
+                ratio_str = "Ratio:0.000    "
+
+            dup_tag = " [DUP]" if duplicate else ""
 
             self._torrents[info_hash] = {
                 "info_hash_hex":  normalize_info_hash(info_hash),
@@ -322,9 +342,9 @@ class StatsManager:
             }
 
             logger.info(
-                "[%-11s] %s | DL:%8.2fMB | RealUL:%8.2fMB | RepUL:%8.2fMB | %s | Ann#%d",
+                "[%-11s] %s | DL:%8.2fMB | RealUL:%8.2fMB | RepUL:%8.2fMB | %s | Ann#%d%s",
                 "SEEDING" if is_seed else "DOWNLOADING", dhash,
-                real_dl / 1e6, real_ul / 1e6, reported / 1e6, ratio_str, ann_cnt,
+                real_dl / 1e6, real_ul / 1e6, reported / 1e6, ratio_str, ann_cnt, dup_tag,
             )
             return reported, rep_dl
 
