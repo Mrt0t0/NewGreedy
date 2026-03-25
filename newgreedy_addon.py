@@ -38,7 +38,8 @@ def _setup_logging():
     if log.handlers:
         return log
     log.setLevel(logging.INFO)
-    fmt = logging.Formatter("[%(asctime)s] %(message)s", "%H:%M:%S.%f"[:-3])
+    log.propagate = False          # never bubble up to root logger
+    fmt = logging.Formatter("[%(asctime)s] %(message)s", "%H:%M:%S")
     for h in (
         logging.FileHandler(_LOG_FILE, encoding="utf-8"),
         logging.StreamHandler(sys.stdout),
@@ -50,7 +51,7 @@ def _setup_logging():
 logger = _setup_logging()
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
+# -- Helpers --------------------------------------------------------------------
 
 def normalize_info_hash(raw):
     if not raw:
@@ -113,7 +114,7 @@ def rewrite_query(path, new_uploaded, peer_var=0.0,
     return base + "?" + q
 
 
-# ── Config ─────────────────────────────────────────────────────────────────────
+# -- Config ---------------------------------------------------------------------
 
 def load_config(path=None):
     cfg = configparser.ConfigParser(interpolation=None)
@@ -122,29 +123,27 @@ def load_config(path=None):
 
 
 def validate_config(cfg):
-    ok  = True
-    gf  = lambda s, k, d: cfg.getfloat(s, k)   if cfg.has_option(s, k) else d
-    gs  = lambda s, k, d: cfg.get(s, k, fallback=d).strip()
-    gi  = lambda s, k, d: cfg.getint(s, k)      if cfg.has_option(s, k) else d
+    gf = lambda s, k, d: cfg.getfloat(s, k) if cfg.has_option(s, k) else d
+    gs = lambda s, k, d: cfg.get(s, k, fallback=d).strip()
     logger.info("-- Config validation v%s --", VERSION)
     mode = gs("spoofing", "upload_mode", "ratio_based")
     if mode not in ("ratio_based", "multiplier"):
         logger.error("  ERROR: upload_mode must be ratio_based or multiplier")
-        ok = False
+        return False
     for cond, msg in [
-        (gf("spoofing", "target_ratio",            1.5)  < 1.0,  "target_ratio < 1.0"),
-        (gf("spoofing", "target_ratio",            1.5)  > 5.0,  "target_ratio > 5.0"),
-        (gf("spoofing", "catch_up_factor",         0.15) > 1.0,  "catch_up_factor > 1.0"),
-        (gf("spoofing", "upload_noise_pct",        3.0)  > 15.0, "upload_noise_pct > 15"),
-        (gf("anti_detection", "peer_variance",     0.15) > 0.5,  "peer_variance > 0.5"),
+        (gf("spoofing", "target_ratio",        1.5)  < 1.0,  "target_ratio < 1.0"),
+        (gf("spoofing", "target_ratio",        1.5)  > 5.0,  "target_ratio > 5.0"),
+        (gf("spoofing", "catch_up_factor",     0.15) > 1.0,  "catch_up_factor > 1.0"),
+        (gf("spoofing", "upload_noise_pct",    3.0)  > 15.0, "upload_noise_pct > 15"),
+        (gf("anti_detection", "peer_variance", 0.15) > 0.5,  "peer_variance > 0.5"),
     ]:
         if cond:
             logger.warning("  WARNING: %s", msg)
     logger.info("-- Config OK (mode=%s) --", mode)
-    return ok
+    return True
 
 
-# ── Tracker filter ─────────────────────────────────────────────────────────────
+# -- Tracker filter -------------------------------------------------------------
 
 class TrackerFilter:
     def __init__(self, cfg):
@@ -163,7 +162,7 @@ class TrackerFilter:
         return True
 
 
-# ── Interval guard ─────────────────────────────────────────────────────────────
+# -- Interval guard -------------------------------------------------------------
 
 class IntervalGuard:
     def __init__(self, default=1800):
@@ -185,7 +184,7 @@ class IntervalGuard:
             self._ivl[host] = max(60, interval)
 
 
-# ── Stats manager ──────────────────────────────────────────────────────────────
+# -- Stats manager --------------------------------------------------------------
 
 class StatsManager:
 
@@ -203,32 +202,30 @@ class StatsManager:
         except (OSError, AttributeError):
             pass
 
-    # ── config ──────────────────────────────────────────────────────────────
-
     def _load_cfg(self, cfg):
         gf = lambda s, k, d: cfg.getfloat(s, k)   if cfg.has_option(s, k) else d
         gb = lambda s, k, d: cfg.getboolean(s, k) if cfg.has_option(s, k) else d
         gs = lambda s, k, d: cfg.get(s, k, fallback=d).strip()
 
-        self._upload_mode   = gs("spoofing", "upload_mode",              "ratio_based").lower()
-        self._target_ratio  = gf("spoofing", "target_ratio",              1.5)
-        self._max_ratio     = gf("spoofing", "max_ratio_per_torrent",     3.0)
-        self._seed_credit   = int(gf("spoofing", "seed_credit_mb",        5.0) * 1_000_000)
-        self._catch_up      = gf("spoofing", "catch_up_factor",           0.15)
-        self._max_speed_bps = gf("spoofing", "max_simulated_speed_mbps",  10.0) * 125_000
-        self._noise_pct     = gf("spoofing", "upload_noise_pct",          3.0)
-        self._dl_ratio      = gf("spoofing", "seeding_dl_ratio",          0.85)
+        self._upload_mode   = gs("spoofing", "upload_mode",             "ratio_based").lower()
+        self._target_ratio  = gf("spoofing", "target_ratio",             1.5)
+        self._max_ratio     = gf("spoofing", "max_ratio_per_torrent",    3.0)
+        self._seed_credit   = int(gf("spoofing", "seed_credit_mb",       5.0) * 1_000_000)
+        self._catch_up      = gf("spoofing", "catch_up_factor",          0.15)
+        self._max_speed_bps = gf("spoofing", "max_simulated_speed_mbps", 10.0) * 125_000
+        self._noise_pct     = gf("spoofing", "upload_noise_pct",         3.0)
+        self._dl_ratio      = gf("spoofing", "seeding_dl_ratio",         0.85)
 
-        self._spoof_ua      = gb("anti_detection", "spoof_user_agent",    True)
-        self._ua_mode       = gs("anti_detection", "user_agent_mode",     "random").lower()
-        self._ua_value      = gs("anti_detection", "user_agent_value",    "qBittorrent/4.6.7")
-        self._spoof_pid     = gb("anti_detection", "spoof_peer_id",       True)
-        self._spoof_port    = gb("anti_detection", "spoof_port",          True)
-        self._spoof_peers   = gb("anti_detection", "spoof_peers",         True)
-        self._peer_var      = gf("anti_detection", "peer_variance",       0.15)
-        self._spoof_hdrs    = gb("anti_detection", "spoof_headers",       True)
-        self._persist       = gb("stats", "persist_stats",   True)
-        self._stats_file    = _BASE_DIR / gs("stats", "stats_file", "stats.json")
+        self._spoof_ua      = gb("anti_detection", "spoof_user_agent",   True)
+        self._ua_mode       = gs("anti_detection", "user_agent_mode",    "random").lower()
+        self._ua_value      = gs("anti_detection", "user_agent_value",   "qBittorrent/4.6.7")
+        self._spoof_pid     = gb("anti_detection", "spoof_peer_id",      True)
+        self._spoof_port    = gb("anti_detection", "spoof_port",         True)
+        self._spoof_peers   = gb("anti_detection", "spoof_peers",        True)
+        self._peer_var      = gf("anti_detection", "peer_variance",      0.15)
+        self._spoof_hdrs    = gb("anti_detection", "spoof_headers",      True)
+        self._persist       = gb("stats", "persist_stats",               True)
+        self._stats_file    = _BASE_DIR / gs("stats", "stats_file",      "stats.json")
 
         pr = gs("anti_detection", "port_range", "6881-6999")
         try:
@@ -250,8 +247,6 @@ class StatsManager:
                 logger.info("Config reloaded OK.")
         except Exception as e:
             logger.error("Config reload error: %s", e)
-
-    # ── persistence ─────────────────────────────────────────────────────────
 
     def _load_stats(self):
         p = Path(self._stats_file)
@@ -284,14 +279,12 @@ class StatsManager:
             time.sleep(60)
             self.save()
 
-    # ── core calculation ─────────────────────────────────────────────────────
-
     def compute(self, info_hash, real_ul, real_dl, left, interval=1800.0):
         with self._lock:
-            is_seed  = (left == 0)
-            dhash    = normalize_info_hash(info_hash)[:8]
-            prev     = self._torrents.get(info_hash, {})
-            ann_cnt  = int(prev.get("announce_count", 0)) + 1
+            is_seed      = (left == 0)
+            dhash        = normalize_info_hash(info_hash)[:8]
+            prev         = self._torrents.get(info_hash, {})
+            ann_cnt      = int(prev.get("announce_count", 0)) + 1
             cumul_dl     = float(prev.get("cumul_dl",     0)) + real_dl
             cumul_rep_ul = float(prev.get("cumul_rep_ul", 0))
 
@@ -301,13 +294,12 @@ class StatsManager:
                 mul      = max(1.0, random.gauss(1.4, 0.15))
                 reported = max(apply_noise(int(real_ul * mul), self._noise_pct), real_ul)
 
-            # Inject downloaded for pure seeders
             rep_dl = real_dl
             if is_seed and real_dl == 0 and reported > 0 and self._dl_ratio > 0:
                 rep_dl = apply_noise(int(reported * self._dl_ratio), self._noise_pct)
 
-            new_rep  = cumul_rep_ul + reported
-            ratio_t  = new_rep / cumul_dl if cumul_dl > 0 else 0.0
+            new_rep = cumul_rep_ul + reported
+            ratio_t = new_rep / cumul_dl if cumul_dl > 0 else 0.0
 
             self._torrents[info_hash] = {
                 "info_hash_hex":  normalize_info_hash(info_hash),
@@ -343,8 +335,6 @@ class StatsManager:
             rep = real_ul
         return max(apply_noise(rep, self._noise_pct), real_ul)
 
-    # ── UA / peer_id helpers ─────────────────────────────────────────────────
-
     def get_ua(self, original):
         if not self._spoof_ua or self._ua_mode == "passthrough":
             return original
@@ -367,7 +357,7 @@ class StatsManager:
     def spoof_hdrs(self): return self._spoof_hdrs
 
 
-# ── Module-level singletons ────────────────────────────────────────────────────
+# -- Module-level singletons ----------------------------------------------------
 
 _cfg    = load_config()
 validate_config(_cfg)
@@ -376,7 +366,7 @@ _filter = TrackerFilter(_cfg)
 _guard  = IntervalGuard(_cfg.getint("advanced", "min_announce_interval", fallback=1800))
 
 
-# ── mitmproxy addon ────────────────────────────────────────────────────────────
+# -- mitmproxy addon ------------------------------------------------------------
 
 class NewGreedyAddon:
 
@@ -396,7 +386,9 @@ class NewGreedyAddon:
 
         _, _, raw_q = path.partition("?")
         try:
-            params = dict(urllib.parse.parse_qsl(raw_q, keep_blank_values=True, encoding="latin-1"))
+            params = dict(urllib.parse.parse_qsl(
+                raw_q, keep_blank_values=True, encoding="latin-1"
+            ))
         except Exception as e:
             logger.debug("Cannot parse query params for announce request: %s", e)
             return
