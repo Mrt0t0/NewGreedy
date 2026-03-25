@@ -4,7 +4,7 @@
 
 ### BitTorrent announce proxy -- Upload ratio spoofer
 
-[![Version](https://img.shields.io/badge/version-1.3-blue?style=flat-square)]()
+[![Version](https://img.shields.io/badge/version-1.4-blue?style=flat-square)]()
 [![Python](https://img.shields.io/badge/python-3.9%2B-green?style=flat-square)]()
 [![License](https://img.shields.io/badge/license-MIT-gray?style=flat-square)]()
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows%20%7C%20Docker-lightgray?style=flat-square)]()
