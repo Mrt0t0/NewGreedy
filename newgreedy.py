@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-NewGreedy v1.3
+NewGreedy v1.4
+Launcher -- starts mitmproxy on a single port (HTTP + HTTPS).
+All logic lives in newgreedy_addon.py.
+UDP tracker announces bypass this proxy entirely by design.
 """
 
-import configparser, subprocess, sys
-import logging
+import configparser, subprocess, sys, logging, threading, shutil
 from pathlib import Path
 
-VERSION     = "1.3"
+VERSION     = "1.4"
 ADDON       = Path(__file__).parent / "newgreedy_addon.py"
 CONFIG      = Path(__file__).parent / "config.ini"
 GITHUB_REPO = "Mrt0t0/NewGreedy"
 
-# stdout only -- systemd writes stdout to the log file via
-# StandardOutput=append: in the unit file.
-# A FileHandler here would write the same line twice.
 logging.getLogger().setLevel(logging.WARNING)
 logger = logging.getLogger("newgreedy")
 if not logger.handlers:
@@ -35,25 +34,19 @@ def load_port():
 def check_update():
     try:
         import requests
-
         r = requests.get(
-            f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
-            timeout=5,
+            f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest", timeout=5
         )
         latest = r.json().get("tag_name", "").lstrip("v")
         if not latest:
             return
-
         def ver(s):
             try:
                 return tuple(int(x) for x in s.split("."))
             except Exception:
                 return (0,)
-
         if ver(latest) > ver(VERSION):
-            logger.info(
-                "New version available: v%s  (run: sudo ./install.sh --update)", latest
-            )
+            logger.info("New version available: v%s  (run: sudo ./install.sh --update)", latest)
         else:
             logger.info("NewGreedy v%s is up to date.", VERSION)
     except Exception:
@@ -62,7 +55,6 @@ def check_update():
 
 def main():
     logger.info("NewGreedy v%s starting...", VERSION)
-
     if not ADDON.exists():
         logger.error("newgreedy_addon.py not found at %s", ADDON)
         sys.exit(1)
@@ -70,38 +62,20 @@ def main():
     port = load_port()
     logger.info("Launching mitmproxy on 0.0.0.0:%d  (HTTP + HTTPS)", port)
 
-    import threading
     threading.Thread(target=check_update, daemon=True).start()
 
-    import shutil
     mitmdump = shutil.which("mitmdump")
+    runner   = [mitmdump] if mitmdump else [sys.executable, "-m", "mitmproxy.tools.main"]
 
-    # --mode regular : standard HTTP proxy, no transparent interception.
-    # UDP tracker announces are NOT routed through an HTTP proxy by
-    # qBittorrent -- they go directly to the tracker over UDP.
-    # This proxy only sees HTTP/HTTPS announces.
-    if mitmdump:
-        cmd = [
-            mitmdump,
-            "--mode",        "regular",
-            "--listen-host", "0.0.0.0",
-            "--listen-port", str(port),
-            "--scripts",     str(ADDON),
-            "--set",         "block_global=false",
-            "--set",         "ssl_insecure=false",
-            "--quiet",
-        ]
-    else:
-        cmd = [
-            sys.executable, "-m", "mitmproxy.tools.main",
-            "--mode",        "regular",
-            "--listen-host", "0.0.0.0",
-            "--listen-port", str(port),
-            "--scripts",     str(ADDON),
-            "--set",         "block_global=false",
-            "--set",         "ssl_insecure=false",
-            "--quiet",
-        ]
+    cmd = runner + [
+        "--mode",        "regular",
+        "--listen-host", "0.0.0.0",
+        "--listen-port", str(port),
+        "--scripts",     str(ADDON),
+        "--set",         "block_global=false",
+        "--set",         "ssl_insecure=true",
+        "--quiet",
+    ]
 
     try:
         proc = subprocess.run(cmd)
@@ -109,7 +83,7 @@ def main():
     except KeyboardInterrupt:
         logger.info("Shutdown requested.")
     except FileNotFoundError:
-        logger.error("mitmproxy not found. Install it with:  pip install mitmproxy")
+        logger.error("mitmproxy not found. Install: pip install mitmproxy")
         sys.exit(1)
 
 
