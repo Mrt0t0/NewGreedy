@@ -1,32 +1,30 @@
 #!/usr/bin/env python3
-"""NewGreedy v1.3
-Launcher -- starts mitmproxy on a single port (HTTP + HTTPS).
-All logic lives in newgreedy_addon.py.
+"""
+NewGreedy v1.3
 """
 
-import configparser, os, signal, subprocess, sys
+import configparser, subprocess, sys
 import logging
 from pathlib import Path
 
 VERSION     = "1.3"
 ADDON       = Path(__file__).parent / "newgreedy_addon.py"
 CONFIG      = Path(__file__).parent / "config.ini"
-LOG_FILE    = Path(__file__).parent / "newgreedy.log"
 GITHUB_REPO = "Mrt0t0/NewGreedy"
 
-# Single named logger -- no propagation to root
+# stdout only -- systemd writes stdout to the log file via
+# StandardOutput=append: in the unit file.
+# A FileHandler here would write the same line twice.
 logging.getLogger().setLevel(logging.WARNING)
 logger = logging.getLogger("newgreedy")
 if not logger.handlers:
     logger.setLevel(logging.INFO)
     logger.propagate = False
     _fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-    for _h in (
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
-        logging.StreamHandler(sys.stdout),
-    ):
-        _h.setFormatter(_fmt)
-        logger.addHandler(_h)
+    _h = logging.StreamHandler(sys.stdout)
+    _h.setFormatter(_fmt)
+    logger.addHandler(_h)
+
 
 def load_port():
     cfg = configparser.ConfigParser(interpolation=None)
@@ -37,6 +35,7 @@ def load_port():
 def check_update():
     try:
         import requests
+
         r = requests.get(
             f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
             timeout=5,
@@ -77,6 +76,10 @@ def main():
     import shutil
     mitmdump = shutil.which("mitmdump")
 
+    # --mode regular : standard HTTP proxy, no transparent interception.
+    # UDP tracker announces are NOT routed through an HTTP proxy by
+    # qBittorrent -- they go directly to the tracker over UDP.
+    # This proxy only sees HTTP/HTTPS announces.
     if mitmdump:
         cmd = [
             mitmdump,
