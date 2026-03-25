@@ -259,7 +259,7 @@ certutil -addstore -f ROOT mitmproxy-ca.pem
 <details>
 <summary><strong>Full config reference (click to expand)</strong></summary>
 
-<br>
+
 ; ------------------------------------------------------------
 [proxy]
 ; ------------------------------------------------------------
