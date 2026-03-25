@@ -1,6 +1,6 @@
 <div align="center">
 
-# :green_circle: NewGreedy
+# NewGreedy
 
 ### BitTorrent announce proxy -- Upload ratio spoofer
 
@@ -256,10 +256,17 @@ certutil -addstore -f ROOT mitmproxy-ca.pem
 | Windows | `%LOCALAPPDATA%\NewGreedy\config.ini` |
 | Docker | `./config.ini` (if mounted) |
 
+**Edit and reload live (Linux/macOS):**
+
+```bash
+nano /opt/newgreedy/config.ini
+kill -HUP $(systemctl show --property MainPID newgreedy.service | cut -d= -f2)
+```
+
 <details>
 <summary><strong>Full config reference (click to expand)</strong></summary>
 
-
+```ini
 ; ------------------------------------------------------------
 [proxy]
 ; ------------------------------------------------------------
@@ -456,7 +463,10 @@ multi_tracker_delay_max   = 8.0
 ; Simulates reconnects to explain ratio jumps and peer count changes naturally.
 ; Recommended: 0.02 to 0.05
 event_anomaly_probability = 0.03
-</details> ```
+```
+
+</details>
+
 ---
 
 ## :bar_chart: Reading the logs
