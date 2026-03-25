@@ -298,6 +298,12 @@ upload_mode               = ratio_based
 ; Accepted range: 1.0 to 5.0
 target_ratio              = 1.5
 
+; [ratio_based only] -- NEW v1.4
+; If target_ratio = 1.5 at first run, auto-randomizes it to 1.42-1.54.
+; Prevents all instances reporting identical ratios (tracker detection vector).
+; Set to false to keep the exact value defined above.
+anti_clustering           = true
+
 ; [ratio_based only]
 ; Hard cap per torrent. Once the reported ratio reaches this value,
 ; NewGreedy stops boosting and only reports the real upload.
@@ -343,6 +349,11 @@ max_simulated_speed_mbps  = 10.0
 ; Recommended: 2.0 to 5.0. Set to 0 to disable.
 upload_noise_pct          = 3.0
 
+; Probability (0.0 to 1.0) that an announce reports NO extra upload credit. -- NEW v1.4
+; Simulates natural pauses, disconnects, or tracker misses.
+; Recommended: 0.10 to 0.20 for maximum realism.
+stagnation_probability    = 0.15
+
 ; ------------------------------------------------------------
 [anti_detection]
 ; ------------------------------------------------------------
@@ -358,8 +369,12 @@ user_agent_mode           = random
 ; Must match a real torrent client version to avoid detection.
 user_agent_value          = qBittorrent/4.6.7
 
+; Enable User-Agent spoofing (set false to disable entirely).
+spoof_user_agent          = true
+
 ; Generate a peer_id consistent with the spoofed User-Agent.
 ; A mismatched peer_id and UA is a common detection vector.
+; Rotated every 4-6 hours instead of fixed per session. -- UPDATED v1.4
 ; Recommended: true
 spoof_peer_id             = true
 
@@ -430,7 +445,24 @@ stats_file                = stats.json
 ; (that value takes precedence at runtime).
 ; Default matches the BitTorrent standard (1800s = 30 minutes).
 min_announce_interval     = 1800
-```
+
+; Log verbosity level. -- NEW v1.4
+;   DEBUG    ->  shows per-announce detectability score (0-10) and full rewrite detail
+;   INFO     ->  standard announce log (recommended)
+;   WARNING  ->  only unusual events
+;   ERROR    ->  only errors
+log_level                 = INFO
+
+; Random delay (seconds) between duplicate announces on multi-tracker torrents. -- NEW v1.4
+; Prevents all trackers receiving simultaneous identical announces.
+; Recommended: 0.5 to 8.0
+multi_tracker_delay_min   = 0.5
+multi_tracker_delay_max   = 8.0
+
+; Probability (0.0 to 1.0) of injecting a spontaneous event=stopped + event=started. -- NEW v1.4
+; Simulates reconnects to explain ratio jumps and peer count changes naturally.
+; Recommended: 0.02 to 0.05
+event_anomaly_probability = 0.03
 
 </details>
 
