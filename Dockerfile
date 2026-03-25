@@ -1,35 +1,36 @@
-# NewGreedy v1.1 — Docker image
-# Modes:
-#   Standard  : docker run ... newgreedy
-#   mitmproxy : docker run ... newgreedy --mitmproxy
-
 FROM python:3.11-slim
 
-LABEL maintainer="Mrt0t0"
-LABEL version="1.1"
-LABEL description="NewGreedy BitTorrent HTTP/HTTPS proxy"
-
-# System deps
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    openssl git curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# Python deps
-RUN pip install --no-cache-dir requests mitmproxy
+LABEL maintainer="Mrt0t0" \
+      version="1.3" \
+      description="NewGreedy - BitTorrent announce proxy"
 
 WORKDIR /app
-COPY newgreedy.py newgreedy_addon.py config.ini ./
 
-# Volumes for persistence and logs
-VOLUME ["/app/data"]
+# System deps
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git && \
+    rm -rf /var/lib/apt/lists/*
 
-# Default config points stats_file / logs to /app/data
-RUN mkdir -p /app/data
+# Python deps
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
+# Generate mitmproxy CA on build
+RUN mitmdump --quiet & sleep 4 && kill $! 2>/dev/null; true
+
+# Copy app files
+COPY newgreedy.py        .
+COPY newgreedy_addon.py  .
+COPY config.ini          .
+
+# Expose proxy port
 EXPOSE 3456
 
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+# Mount point for persistent data (stats.json, logs, config override)
+VOLUME ["/app/data"]
 
-ENTRYPOINT ["docker-entrypoint.sh"]
-CMD []
+# Entrypoint
+CMD ["python", "newgreedy.py"]

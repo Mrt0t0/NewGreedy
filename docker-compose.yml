@@ -1,35 +1,32 @@
-# docker-compose.yml — NewGreedy v1.1
-# Standard mode  : docker compose up
-# mitmproxy mode : override CMD in docker-compose.override.yml
-
-version: "3.9"
+# docker-compose.yml -- NewGreedy v1.3
+# Usage:
+#   docker compose up -d              # start
+#   docker compose logs -f            # follow logs
+#   docker compose pull && docker compose up -d --build   # update
 
 services:
   newgreedy:
     build: .
+    image: newgreedy:1.3
     container_name: newgreedy
     restart: unless-stopped
     ports:
-      - "3456:3456"       # proxy
+      - "127.0.0.1:3456:3456"   # only exposed on localhost
     volumes:
-      - ./data:/app/data  # stats.json + newgreedy.log persistence
-      - ./config.ini:/app/config.ini:ro
-    # Uncomment for mitmproxy mode:
-    # command: ["--mitmproxy"]
-
-  # ── mitmproxy mode (HTTPS trackers) ────────────────────────────────────────
-  # newgreedy-mitm:
-  #   build: .
-  #   container_name: newgreedy-mitm
-  #   restart: unless-stopped
-  #   command: ["--mitmproxy"]
-  #   ports:
-  #     - "3456:3456"
-  #     - "8080:8080"      # mitmproxy web UI (optional)
-  #   volumes:
-  #     - ./data:/app/data
-  #     - ./config.ini:/app/config.ini:ro
-  #     - mitmproxy_ca:/root/.mitmproxy
+      # Persistent data: stats.json + newgreedy.log
+      - newgreedy_data:/app/data
+      # Optional: mount your own config.ini
+      # - ./config.ini:/app/config.ini:ro
+    environment:
+      - TZ=Europe/Paris
+    healthcheck:
+      test: ["CMD", "curl", "-x", "http://localhost:3456", "-s", "--max-time", "3",
+             "http://example.com"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
 
 volumes:
-  mitmproxy_ca:
+  newgreedy_data:
+    driver: local

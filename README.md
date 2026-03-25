@@ -1,501 +1,395 @@
-# NewGreedy v1.1 — HTTP/HTTPS Proxy for BitTorrent Clients
-**MrT0t0** / [https://github.com/Mrt0t0/NewGreedy](https://github.com/Mrt0t0/NewGreedy)
+<div align="center">
 
-> Linux (Debian/Ubuntu) · macOS · Windows · Docker — Python 3.8+
+# :green_circle: NewGreedy
 
----
+### BitTorrent announce proxy -- Upload ratio spoofer
 
-## Responsible Use
+[![Version](https://img.shields.io/badge/version-1.3-blue?style=flat-square)]()
+[![Python](https://img.shields.io/badge/python-3.9%2B-green?style=flat-square)]()
+[![License](https://img.shields.io/badge/license-MIT-gray?style=flat-square)]()
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows%20%7C%20Docker-lightgray?style=flat-square)]()
 
-NewGreedy is intended for **educational and research purposes only**.
-- ✅ Use it on **content you own** or content that is **freely and legally distributed**
-- ✅ Use it to study HTTP proxy mechanics, BitTorrent protocol internals, or network traffic
-- ❌ **Do not use it to download or share copyrighted content without authorization**
-- ❌ **Do not use it to violate the terms of service of any private tracker**
-
-The authors take no responsibility for misuse of this software.
+</div>
 
 ---
 
-## Description
-
-NewGreedy is an HTTP/HTTPS proxy for BitTorrent clients (GreedyTorrent-like).
-It intercepts tracker announce requests and modifies `uploaded` statistics,
-with advanced anti-detection (UA spoofing, coherent progression, peers spoofing),
-ratio management, and persistent stats across restarts.
+> :warning: **Disclaimer**
+> NewGreedy is provided for **educational and research purposes only**.
+> Using this tool on private trackers may violate their terms of service and result in a permanent ban.
+> The author assumes no responsibility for any misuse. **Use at your own risk.**
 
 ---
 
-## What's new in v1.1
+## :wrench: What does NewGreedy do?
 
-| Feature | Description |
-|---|---|
-| **User-Agent spoofing** | 3 modes : `random` · `fixed` · `passthrough` — configurable in `config.ini` |
-| **Coherent progression** | Slope guard — no unrealistic upload spike between two announces |
-| **Numpeers/numseeds spoofing** | Randomizes `numwant`, `num_peers`, `num_seeds` with configurable variance |
-| **Config validation** | Startup check — warnings for risky values, hard stop on critical errors |
-| **Stats persistence** | `stats.json` auto-saved every 60s (atomic write) — ratios survive restarts |
-| **info_hash display fix** | URL-encoded binary hash decoded to readable hex in all log lines |
-| **`uninstall.sh`** | Clean Linux uninstall — service, files, CA |
-| **Docker support** | Dockerfile + docker-compose — standard and mitmproxy modes |
-
----
-
-## Architecture
+NewGreedy is a **local proxy** that runs on a **single port (default: 3456)**.
+It intercepts BitTorrent tracker announces -- both **HTTP and HTTPS** -- and rewrites
+the `uploaded` field before it reaches the tracker.
 
 ```
-MODE 1 — Standard (newgreedy.py)
-─────────────────────────────────────────────────────────────────────
-qBittorrent ──HTTP──► newgreedy.py:3456 ──HTTP──►  tracker   ✅ modified
-qBittorrent ──HTTP──► newgreedy.py:3456 ──HTTPS──► tracker   ✅ modified
-qBittorrent ──HTTP──► newgreedy.py:3456 ══CONNECT►  tracker   ⚠️  tunnel only
-
-MODE 2 — mitmproxy (newgreedy_addon.py)
-─────────────────────────────────────────────────────────────────────
-qBittorrent ──HTTP──► mitmdump:3456 ──HTTP──►  tracker        ✅ modified
-qBittorrent ──HTTP──► mitmdump:3456 ──HTTPS──► tracker        ✅ modified (SSL inspection)
+Your client         NewGreedy :3456 (HTTP + HTTPS)       Tracker
+     |                       |                               |
+     |---- /announce -------->|                               |
+     |     uploaded=50MB      |   uploaded=80MB ------------->|
+     |     downloaded=200MB   |   downloaded=200MB            |
+     |                        |<----------- OK ---------------|
+     |<-----------------------|                               |
 ```
 
-| Situation | Recommended mode |
-|---|---|
-| Trackers use `http://` | Standard (`newgreedy.py`) |
-| Trackers use `https://` | **mitmproxy** (`newgreedy_addon.py`) |
-| Mixed HTTP + HTTPS | **mitmproxy** (`newgreedy_addon.py`) |
+> Your torrent client is **never modified**. Only what is reported to the tracker changes.
 
 ---
 
-## Files
+## :sparkles: v1.3 -- Key changes
 
-| File | Description |
-|---|---|
-| `newgreedy.py` | Standalone HTTP proxy — standard mode |
-| `newgreedy_addon.py` | mitmproxy addon — full HTTP+HTTPS interception |
-| `config.ini` | Shared configuration for both modes |
-| `install.sh` | Automated installer — Linux only |
-| `uninstall.sh` | Clean uninstaller — Linux only |
-| `Dockerfile` | Docker image — standard + mitmproxy modes |
-| `docker-compose.yml` | Docker Compose deployment |
-| `docker-entrypoint.sh` | Docker entrypoint script |
-| `README.md` | This file |
+| | v1.2 | v1.3 |
+|---|---|---|
+| Reported upload based on | Real upload x multiplier | **Downloaded x target_ratio** |
+| Real upload = 0 | Reported upload = 0 | **Reported upload continues** |
+| Pure seeder credit | Fixed value | **Triangular random (x0.4 to x1.8)** |
+| Catch-up | Logistic S-curve | **catch_up_factor (15%/announce)** |
+| Ratio cap | Global cooldown | **Per-torrent hard cap** |
 
 ---
 
-## Features
+## :gear: How the calculation works
 
-| Feature | Description |
-|---|---|
-| **User-Agent Spoofing** | `random` · `fixed` · `passthrough` modes — see config reference |
-| **Coherent Progression** | Slope guard: limits upload delta to prevent announce spikes |
-| **Peers/Seeds Spoofing** | Randomizes `numwant`, `num_peers`, `num_seeds` with ±variance |
-| **Intelligent Seeding** | Lighter multiplier after torrent completion (`left=0`) |
-| **Cooldown Mode** | Reports real upload after global ratio limit is reached |
-| **Randomized Multiplier** | Adds ±variance to reported values |
-| **Upload Speed Cap** | Prevents unrealistic upload spikes between announces |
-| **Global Ratio Limiter** | Prevents suspiciously high ratios |
-| **Config Validation** | Startup check with warnings and hard stops |
-| **Stats Persistence** | Atomic `stats.json` auto-saved every 60s, reloaded at startup |
-| **info_hash hex display** | Correct hex display in all log lines |
-| **HTTPS Tracker Support** | Both modes support HTTPS tracker forwarding |
-| **Full SSL Inspection** | mitmproxy mode intercepts and modifies HTTPS announces |
-| **Auto Certificate** | Generates self-signed cert automatically if missing |
-| **TLS 1.2 minimum** | Enforced on HTTPS proxy listener |
-| **Dual Logging** | Console + file logging (UTF-8) |
-| **Multi-threaded** | Handles concurrent clients |
-| **Auto Update Check** | Notifies of new GitHub releases at startup |
-| **Docker support** | Dockerfile + docker-compose, standard and mitmproxy modes |
-
----
-
-## Requirements
-
-- Python 3.8+
-- `requests` — `pip install requests`
-- `openssl` — optional, for auto certificate generation
-- `mitmproxy` — optional, required for mitmproxy mode (`pip install mitmproxy`)
-- Docker — optional
+```
+total_downloaded  (cumulated)
+        |
+        x target_ratio  (+ Gaussian variance)
+        |
+        = target_ul_total
+        |
+        - already_reported
+        |
+        = delta_needed
+        |
+        x catch_up_factor (default 15%)     <- gradual ramp, no spike
+        |
+        min(result, max_speed_mbps x interval)  <- speed cap
+        max(result, real_ul)                    <- never below real
+        +/- Gaussian noise (upload_noise_pct)   <- natural variation
+        |
+        if per-torrent ratio >= max_ratio: reported = real_ul
+        |
+        -----> sent to tracker
+```
 
 ---
 
-## 🐧 Linux — Quick Start
+## :rocket: Quick Start
 
-### Standard mode (HTTP trackers)
+### 1. Get the files
 
 ```bash
-cd /tmp
 git clone https://github.com/Mrt0t0/NewGreedy.git
 cd NewGreedy
+```
+
+### 2. Install (see platform sections below)
+
+### 3. Configure your torrent client
+
+**qBittorrent** -- Settings -> Connection -> Proxy:
+
+| Field | Value |
+|---|:---:|
+| Type | HTTP |
+| Host | 127.0.0.1 |
+| Port | **3456** |
+| Use proxy for tracker communication | :white_check_mark: |
+
+
+---
+
+## :penguin: Linux
+
+### Install
+
+```bash
 chmod +x install.sh
 sudo ./install.sh
 ```
 
-### mitmproxy mode (HTTPS trackers) — recommended
+What the installer does:
+- Detects your distro (Debian/Ubuntu or RHEL/CentOS)
+- Installs system packages: `git`, `python3-pip`, `ca-certificates`
+- `pip install mitmproxy requests`
+- Clones the repo to `/opt/newgreedy/`  (preserves your `config.ini` on update)
+- Generates the mitmproxy CA and installs it into the system trust store
+- Creates and enables a **systemd service**
+
+### Manage
 
 ```bash
-sudo ./install.sh --mitmproxy
-```
-
-### Uninstall
-
-```bash
-chmod +x uninstall.sh
-sudo ./uninstall.sh
-```
-
-### Linux — HTTPS CA setup (mitmproxy mode)
-
-```bash
-cp ~/.mitmproxy/mitmproxy-ca-cert.pem /usr/local/share/ca-certificates/mitmproxy.crt
-update-ca-certificates
-systemctl restart newgreedy.service
-```
-
----
-
-## 🍎 macOS — Quick Start
-
-### 1. Install dependencies
-
-```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-brew install python git
-pip3 install requests
-# For mitmproxy mode (HTTPS trackers):
-pip3 install mitmproxy
-```
-
-### 2. Clone and run
-
-```bash
-cd ~
-git clone https://github.com/Mrt0t0/NewGreedy.git
-cd NewGreedy
-```
-
-**Standard mode:**
-```bash
-python3 newgreedy.py
-```
-
-**mitmproxy mode (HTTPS trackers):**
-```bash
-mitmdump -p 3456 --ssl-insecure -s newgreedy_addon.py
-```
-
-### 3. Auto-start at login (optional)
-
-Create `~/Library/LaunchAgents/com.newgreedy.plist`:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key><string>com.newgreedy</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/usr/bin/python3</string>
-        <string>/Users/YOUR_USERNAME/NewGreedy/newgreedy.py</string>
-    </array>
-    <key>WorkingDirectory</key>
-    <string>/Users/YOUR_USERNAME/NewGreedy</string>
-    <key>RunAtLoad</key><true/>
-    <key>KeepAlive</key><true/>
-    <key>StandardOutPath</key>
-    <string>/Users/YOUR_USERNAME/NewGreedy/newgreedy.log</string>
-    <key>StandardErrorPath</key>
-    <string>/Users/YOUR_USERNAME/NewGreedy/newgreedy.log</string>
-</dict>
-</plist>
-```
-
-```bash
-launchctl load ~/Library/LaunchAgents/com.newgreedy.plist
-```
-
-### 4. macOS — HTTPS CA setup (mitmproxy mode)
-
-```bash
-mitmdump -p 3456 --ssl-insecure -s newgreedy_addon.py  # Ctrl+C after start
-sudo security add-trusted-cert -d -r trustRoot \
-    -k /Library/Keychains/System.keychain \
-    ~/.mitmproxy/mitmproxy-ca-cert.pem
-```
-
----
-
-## 🪟 Windows — Quick Start
-
-### 1. Install dependencies
-
-1. Download **Python 3.8+** from [python.org](https://www.python.org/downloads/) — ✅ check **"Add Python to PATH"**
-2. Download **Git** from [git-scm.com](https://git-scm.com/download/win)
-3. Open **Command Prompt** and run:
-
-```cmd
-pip install requests
-:: For mitmproxy mode:
-pip install mitmproxy
-```
-
-### 2. Clone and run
-
-```cmd
-cd %USERPROFILE%
-git clone https://github.com/Mrt0t0/NewGreedy.git
-cd NewGreedy
-```
-
-**Standard mode:**
-```cmd
-python newgreedy.py
-```
-
-**mitmproxy mode:**
-```cmd
-mitmdump -p 3456 --ssl-insecure -s newgreedy_addon.py
-```
-
-### 3. Auto-start at login (optional)
-
-Create `start_newgreedy.bat`:
-```bat
-@echo off
-cd /d %USERPROFILE%\NewGreedy
-start /min python newgreedy.py
-```
-Place a shortcut in `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`
-
-### 4. Windows — HTTPS CA setup (mitmproxy mode)
-
-```cmd
-mitmdump -p 3456 --ssl-insecure -s newgreedy_addon.py
-```
-Then:
-1. Open `%USERPROFILE%\.mitmproxy\`
-2. Double-click `mitmproxy-ca-cert.p12`
-3. Install → **Local Machine** → **Trusted Root Certification Authorities**
-
----
-
-## 🐳 Docker — Quick Start
-
-### Standard mode
-
-```bash
-git clone https://github.com/Mrt0t0/NewGreedy.git
-cd NewGreedy
-
-docker build -t newgreedy .
-
-docker run -d \
-  --name newgreedy \
-  -p 3456:3456 \
-  -v $(pwd)/data:/app/data \
-  -v $(pwd)/config.ini:/app/config.ini:ro \
-  newgreedy
-```
-
-### mitmproxy mode (HTTPS trackers)
-
-```bash
-docker run -d \
-  --name newgreedy-mitm \
-  -p 3456:3456 \
-  -v $(pwd)/data:/app/data \
-  -v $(pwd)/config.ini:/app/config.ini:ro \
-  newgreedy --mitmproxy
-```
-
-### Docker Compose
-
-```bash
-# Standard mode (default)
-docker compose up -d
-
-# mitmproxy mode: uncomment the command line in docker-compose.yml, then:
-docker compose up -d
-```
-
-### Docker — HTTPS CA setup (mitmproxy mode)
-
-```bash
-# Extract the CA from the container after first run
-docker cp newgreedy-mitm:/root/.mitmproxy/mitmproxy-ca-cert.pem ./mitmproxy-ca.pem
-```
-Then install `mitmproxy-ca.pem` on the host using the OS method above.
-
-### Docker — Useful commands
-
-```bash
-docker logs -f newgreedy          # Live logs
-docker ps                          # Status
-docker compose down && docker compose up -d  # Restart
-
-# Update
-git pull origin main
-docker compose build --no-cache
-docker compose up -d
-```
-
-> **Note — qBittorrent in Docker:** if qBittorrent runs in the same Docker network,
-> use the container name instead of `127.0.0.1`:
-> ```
-> Host: newgreedy   Port: 3456
-> ```
-
----
-
-## Configure qBittorrent (all platforms)
-
-```
-Tools → Options → Connection → Proxy Server
-Type  : HTTP
-Host  : 127.0.0.1   (or container name if using Docker)
-Port  : 3456
-```
-
-> ✅ Enable  : **Use proxy for tracker connections**
-> ❌ Disable : **Use proxy for peer connections**
-
----
-
-## Configuration Reference
-
-| Key | Default | Description |
-|---|---|---|
-| `listen_port` | `3456` | Local port the proxy listens on |
-| `tracker_timeout` | `5` | Tracker request timeout in seconds |
-| `max_upload_multiplier` | `1.6` | Upload multiplier while downloading |
-| `seeding_multiplier` | `1.2` | Upload multiplier while seeding |
-| `randomization_factor` | `0.25` | Random variance ±% applied to multiplier |
-| `max_simulated_speed_mbps` | `7.6` | Max simulated upload speed (Mbps) |
-| `global_ratio_limit` | `1.8` | Ratio threshold before cooldown |
-| `cooldown_duration_minutes` | `10` | Cooldown duration in minutes |
-| `max_upload_slope` | `2.0` | Max upload delta / download delta ratio per announce |
-| `spoof_user_agent` | `true` | Enable User-Agent spoofing |
-| `user_agent_mode` | `random` | UA mode: `random` \| `fixed` \| `passthrough` |
-| `user_agent_value` | `qBittorrent/4.6.7` | UA string used when `user_agent_mode = fixed` |
-| `spoof_peers` | `true` | Randomize numwant/num_peers/num_seeds |
-| `peer_variance` | `0.15` | Variance ±% applied to peer counts |
-| `enable_https` | `false` | Enable HTTPS on proxy listener (standard mode) |
-| `ssl_certfile` | `cert.pem` | SSL certificate path |
-| `ssl_keyfile` | `key.pem` | SSL private key path |
-| `ssl_autogenerate_cert` | `true` | Auto-generate self-signed cert if missing |
-| `ssl_verify_trackers` | `true` | Verify SSL cert of remote trackers |
-| `persist_stats` | `true` | Enable stats persistence to JSON |
-| `stats_file` | `stats.json` | Stats file path |
-| `log_file` | `newgreedy.log` | Log file path |
-
-### User-Agent modes
-
-| Mode | Behaviour |
-|---|---|
-| `random` | Keeps original UA if it's a known client, otherwise picks randomly from built-in list |
-| `fixed` | Always sends the value defined in `user_agent_value` |
-| `passthrough` | Forwards original UA unchanged — no modification |
-
-> **Recommendation:** use `fixed` with your actual qBittorrent version for maximum consistency between announces.
-
----
-
-## Monitoring
-
-```bash
-# Live log (Linux/macOS)
-tail -f newgreedy.log
-
-# Live log (Windows PowerShell)
-Get-Content newgreedy.log -Wait
-
-# Docker
-docker logs -f newgreedy
-
-# Service status (Linux)
+# Status
 systemctl status newgreedy.service
 
-# Count intercepted announces
-grep -c "DOWNLOADING\|SEEDING\|COOLDOWN" newgreedy.log
+# Real-time logs
+tail -f /opt/newgreedy/newgreedy.log
+journalctl -u newgreedy.service -f
 
-# Check warnings
-grep "WARNING\|ERROR" newgreedy.log | head -20
-```
+# Reload config without restart
+sudo kill -HUP $(systemctl show --property MainPID newgreedy.service | cut -d= -f2)
 
-Expected log output:
-```
-[INFO] Config validation OK — ua_mode=fixed
-[INFO] Stats loaded from stats.json (3 torrents)
-[INFO] HTTP proxy listening on port 3456
-[DOWNLOADING ] 866274e7 | DL:    12.45 MB | Real UL:     0.00 MB | Reported UL:    19.92 MB | Mul: 1.600
-[SEEDING     ] def67890 | DL:   512.00 MB | Real UL:     1.20 MB | Reported UL:   614.40 MB | Mul: 1.182
-[COOLDOWN    ] ghi11223 — 240s remaining
-```
+# Update (git pull + pip upgrade + restart)
+sudo ./install.sh --update
 
----
-
-## Update
-
-**Linux:**
-```bash
-cd /opt/newgreedy && git pull origin main && systemctl restart newgreedy.service
-```
-
-**macOS / Windows:**
-```bash
-cd ~/NewGreedy   # or cd %USERPROFILE%\NewGreedy
-git pull origin main
-# Restart the proxy manually or via your auto-start method
-```
-
-**Docker:**
-```bash
-git pull origin main
-docker compose build --no-cache && docker compose up -d
+# Stop / disable
+systemctl stop    newgreedy.service
+systemctl disable newgreedy.service
 ```
 
 ---
 
-## Troubleshooting
+## :apple: macOS
 
-| Symptom | Fix |
+### Install
+
+```bash
+chmod +x install.sh
+sudo ./install.sh
+```
+
+The script detects macOS and:
+- Uses `brew` if available
+- Installs the CA into the **macOS Keychain** (`security add-trusted-cert`)
+- Prints manual start instructions
+
+### Run
+
+```bash
+cd /opt/newgreedy
+python3 newgreedy.py
+
+# Follow logs
+tail -f /opt/newgreedy/newgreedy.log
+```
+
+### Update
+
+```bash
+sudo ./install.sh --update
+```
+
+---
+
+## :computer: Windows
+
+### Requirements
+
+- Python 3.9+  -- [python.org](https://python.org)
+- Git          -- [git-scm.com](https://git-scm.com)
+
+### Install (PowerShell as Administrator)
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\install.ps1
+```
+
+What the installer does:
+- `pip install mitmproxy requests`
+- Clones the repo to `%LOCALAPPDATA%\NewGreedy`
+- Generates the mitmproxy CA and installs it into **Windows Trusted Root** via `certutil`
+- Creates a **Windows Scheduled Task** that starts NewGreedy at logon
+
+### Manage
+
+```powershell
+# View real-time logs
+Get-Content "$env:LOCALAPPDATA\NewGreedy\newgreedy.log" -Wait
+
+# Update
+.\install.ps1 -Update
+
+# Stop / Start
+Stop-ScheduledTask  -TaskName "NewGreedy"
+Start-ScheduledTask -TaskName "NewGreedy"
+```
+
+> :warning: SIGHUP config hot-reload is not available on Windows.
+> Edit `config.ini` then restart the scheduled task to apply changes.
+
+---
+
+## :whale: Docker
+
+### Start
+
+```bash
+docker compose up -d
+```
+
+### Logs
+
+```bash
+docker compose logs -f
+docker exec newgreedy tail -f /app/newgreedy.log
+```
+
+### Update
+
+```bash
+git pull
+docker compose up -d --build
+```
+
+### Mount your own config
+
+Uncomment in `docker-compose.yml`:
+
+```yaml
+volumes:
+  - ./config.ini:/app/config.ini:ro
+```
+
+Then: `docker compose up -d`
+
+### Install the CA on the host (required for HTTPS)
+
+```bash
+# Extract CA from the container
+docker cp newgreedy:/root/.mitmproxy/mitmproxy-ca-cert.pem ./mitmproxy-ca.pem
+
+# Linux (Debian/Ubuntu)
+sudo cp mitmproxy-ca.pem /usr/local/share/ca-certificates/mitmproxy-newgreedy.crt
+sudo update-ca-certificates
+
+# macOS
+security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain mitmproxy-ca.pem
+
+# Windows (PowerShell as Admin)
+certutil -addstore -f ROOT mitmproxy-ca.pem
+```
+
+---
+
+## :nut_and_bolt: Configuration
+
+| Platform | Config path |
 |---|---|
-| `fatal: detected dubious ownership` | `git config --global --add safe.directory /opt/newgreedy` |
-| Service crashes immediately | `journalctl -u newgreedy.service -n 30 --no-pager` |
-| `mitmdump: command not found` | `pip install mitmproxy` |
-| No log lines after torrent starts | Check qBittorrent proxy: HTTP / 127.0.0.1 / 3456 |
-| `operation canceled` in qBittorrent | Switch to mitmproxy mode — tracker is HTTPS-only |
-| `Connection reset by peer` | Switch to mitmproxy mode — CONNECT tunnel cannot modify HTTPS |
-| Python not found (Windows) | Reinstall Python and check "Add to PATH" |
-| Port 3456 already in use | Change `listen_port` in `config.ini` |
-| Config validation ERROR at boot | Check `tracker_timeout` ≥ 1 in `config.ini` |
-| Stats reset after restart | Ensure `persist_stats = true` and `stats_file` is writable |
-| Hash displayed as `0/0000p.0L` | Update to v1.1 — info_hash display fix included |
-| Docker: proxy unreachable from qBittorrent | Check both containers share the same Docker network |
-| Docker: CA not trusted | Copy CA from container and install on host (see Docker CA setup) |
+| Linux (systemd) | `/opt/newgreedy/config.ini` |
+| macOS | `/opt/newgreedy/config.ini` |
+| Windows | `%LOCALAPPDATA%\NewGreedy\config.ini` |
+| Docker | `./config.ini` (if mounted) |
+
+<details>
+<summary><strong>Full config reference (click to expand)</strong></summary>
+
+```ini
+[proxy]
+listen_port               = 3456
+tracker_timeout           = 5
+
+[spoofing]
+upload_mode               = ratio_based   ; ratio_based | multiplier
+target_ratio              = 1.5
+max_ratio_per_torrent     = 3.0
+seed_credit_mb            = 5.0
+catch_up_factor           = 0.15
+max_simulated_speed_mbps  = 10.0
+upload_noise_pct          = 3.0
+seeding_dl_ratio          = 0.85
+
+[anti_detection]
+user_agent_mode           = random
+user_agent_value          = qBittorrent/4.6.7
+spoof_peer_id             = true
+spoof_peers               = true
+peer_variance             = 0.15
+spoof_port                = true
+port_range                = 6881-6999
+spoof_headers             = true
+intercept_scrape          = true
+tracker_whitelist         =
+tracker_blacklist         =
+
+[stats]
+persist_stats             = true
+stats_file                = stats.json
+
+[advanced]
+min_announce_interval     = 1800
+```
+
+</details>
 
 ---
 
-## Changelog
+## :bar_chart: Reading the logs
+
+```
+[17:30:12] [DOWNLOADING] 6217ba79 | DL: 200.00MB | RealUL: 0.00MB | RepUL: 4.52MB | Ratio:0.022 | Ann#1
+[18:00:14] [SEEDING    ] 6217ba79 | DL:   0.00MB | RealUL: 0.00MB | RepUL: 4.80MB | Ratio:0.312 | Ann#8
+```
+
+| Field | Meaning |
+|---|---|
+| `DL` | Real downloaded this announce cycle |
+| `RealUL` | Real uploaded this announce cycle |
+| `RepUL` | What NewGreedy reported to the tracker |
+| `Ratio` | Cumulative reported ratio for this torrent |
+| `Ann#N` | Total announce count for this torrent |
+
+---
+
+## :file_folder: Files
+
+| File | Platform | Role |
+|---|---|---|
+| `newgreedy.py` | All | Launcher -- starts mitmproxy with the addon |
+| `newgreedy_addon.py` | All | Core logic -- intercepts and rewrites announces |
+| `config.ini` | All | Configuration (inline documentation) |
+| `requirements.txt` | All | Python dependencies |
+| `install.sh` | Linux / macOS | Installer + updater (`--update`) |
+| `install.ps1` | Windows | PowerShell installer + updater (`-Update`) |
+| `Dockerfile` | Docker | Container image definition |
+| `docker-compose.yml` | Docker | Compose stack |
+
+---
+
+## :hammer_and_wrench: Troubleshooting
+
+| Problem | Cause | Solution |
+|---|---|---|
+| Announces not intercepted | Proxy not configured | type=HTTP, host=127.0.0.1, port=3456 |
+| HTTPS not intercepted | CA not trusted | Re-run installer or add CA manually |
+| `mitmproxy not found` | Dep missing | `pip install mitmproxy` |
+| `SSL: CERTIFICATE_VERIFY_FAILED` | CA not installed | Re-run installer |
+| Ratio not improving | `catch_up_factor` too low | Raise to 0.25-0.35 |
+| Ratio improving too fast | `target_ratio` too high | Lower `target_ratio` |
+| Service not starting | Port in use | Change `listen_port` in config.ini |
+| Stats lost after restart | Wrong path or disabled | Check `persist_stats = true` |
+| Docker: HTTPS not intercepted | CA not on host | Follow the Docker CA install steps |
+
+---
+
+## :memo: Changelog
+
+### v1.3 -- Current
+- **Single port 3456** for HTTP and HTTPS (mitmproxy now required)
+- New `ratio_based` mode: `reported_ul = total_downloaded x target_ratio`
+- Upload reported even when `real_ul = 0`
+- Gradual catch-up via `catch_up_factor` -- no announce spikes
+- Gaussian variance on effective ratio -- never perfectly constant
+- Triangular distribution on `seed_credit_mb` for pure seeders
+- Per-torrent ratio hard cap (`max_ratio_per_torrent`)
+- `install.sh --update` and `install.ps1 -Update` for one-command GitHub updates
+- Added: `Dockerfile`, `docker-compose.yml`, `install.ps1`
+- Multiplier mode kept as `upload_mode = multiplier` (backward compat)
+
+### v1.2
+- Dual-port: HTTP proxy (:3456) + optional mitmproxy (:8080)
+- Upload multiplier with Gaussian noise and logistic S-curve
+- Global ratio cooldown
+- peer_id / UA / port spoofing, scrape patch, tracker whitelist/blacklist
+- SIGHUP hot-reload, stats persistence
 
 ### v1.1
-- **User-Agent modes** — `random` \| `fixed` \| `passthrough` configurable in `config.ini`
-- **Coherent upload progression** — slope guard (`max_upload_slope`)
-- **Numpeers/numseeds spoofing** — `spoof_peers`, `peer_variance`
-- **Config validation** — startup warnings + hard stop on critical values
-- **Stats persistence** — atomic `stats.json` (write via `.tmp` + rename, no corruption on crash)
-- **info_hash display fix** — URL-encoded binary hash decoded to readable 40-char hex in logs
-- **`uninstall.sh`** — clean Linux uninstall
-- **Docker support** — Dockerfile + docker-compose, standard and mitmproxy modes
-- **TLS 1.2 minimum** enforced on HTTPS proxy listener
-- **Granular error handling** — SSLError / ConnectionError / Timeout logged separately
-- **Hop-by-hop headers** stripped before forwarding
+- Fix: info_hash binary corruption on intercept
+- HTTPS via separate mitmproxy addon and port
 
 ### v1.0
-- Full HTTPS support — proxy listener (TLS 1.2+) and tracker forwarding
-- `newgreedy_addon.py` — mitmproxy addon for full HTTPS announce interception
-- `install.sh --mitmproxy` — automated mitmproxy mode setup (Linux)
-- macOS and Windows manual setup support
-- `do_CONNECT` handler — TCP tunnel for HTTPS tracker connections (standard mode)
-- Automatic self-signed certificate generation
-- Service runs as root on Linux
-- `compute_reported_upload()` shared function between both modes
+- Initial HTTP-only proxy with upload multiplier
