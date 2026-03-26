@@ -471,19 +471,22 @@ event_anomaly_probability = 0.03
 
 ## :bar_chart: Reading the logs
 
-```
-[17:30:12] [DOWNLOADING] 6217ba79 | DL: 200.00MB | RealUL: 0.00MB | RepUL: 4.52MB | Ratio:0.022 | Ann#1
-[18:00:14] [SEEDING    ] 6217ba79 | DL:   0.00MB | RealUL: 0.00MB | RepUL: 4.80MB | Ratio:0.312 | Ann#8
+```text
+[17:30:12] [DOWNLOADING] 6000079 | DL: 200.00MB | RealUL: 0.00MB | RepUL:  4.52MB | Ratio: 1.050 | Ann#1
+[18:00:14] [SEEDING    ] 80002223 | DL:   0.00MB | RealUL: 3.28MB | RepUL:  8.87MB | SeedUL:2849M | Ann#49
+[18:32:29] [SEEDING    ] 80002223 | DL:   0.00MB | RealUL: 3.60MB | RepUL:  3.60MB | SeedUL:2856M | Ann#51 [STAG]
 ```
 
 | Field | Meaning |
 |---|---|
 | `DL` | Real downloaded this announce cycle |
 | `RealUL` | Real uploaded this announce cycle |
-| `RepUL` | What NewGreedy reported to the tracker |
-| `Ratio` | Cumulative reported ratio for this torrent |
+| `RepUL` | What NewGreedy reported to the tracker for this cycle |
+| `Ratio` | Cumulative reported ratio (shown when DL > 0) |
+| `SeedUL` | Cumulative reported upload |
 | `Ann#N` | Total announce count for this torrent |
-
+| `[STAG]` | **Stagnation cycle:** no extra boost was applied (simulates a natural pause) |
+| `[DUP]` | **Duplicate tracker:** skipped to prevent double-counting on multi-tracker torrents |
 ---
 
 ## :file_folder: Files
