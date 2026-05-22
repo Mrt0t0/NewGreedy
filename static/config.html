@@ -19,24 +19,29 @@
 <main class="container">
   <h1>Configuration</h1>
   <div id="cfg"></div>
-  <button onclick="reload()" class="btn">Reload config</button>
-  <span id="msg"></span>
+  <div class="cfg-actions">
+    <button onclick="reloadCfg()" class="btn">🔄 Reload config</button>
+    <span id="msg"></span>
+  </div>
 </main>
 <script>
 async function load(){
-  const cfg = await fetch("/api/config").then(r=>r.json());
+  const cfg = await fetch("/api/config").then(r=>r.json()).catch(()=>({}));
   let html="";
   for(const [sec, vals] of Object.entries(cfg)){
-    html+=`<h3>[${sec}]</h3><table>`;
-    for(const [k,v] of Object.entries(vals)) html+=`<tr><td class="mono">${k}</td><td>${v}</td></tr>`;
-    html+="</table>";
+    html+=`<div class="cfg-section"><h3>[${sec}]</h3><table>`;
+    for(const [k,v] of Object.entries(vals)){
+      html+=`<tr><td class="mono cfg-key">${k}</td><td class="cfg-val">${v||"<span class=muted>(empty)</span>"}</td></tr>`;
+    }
+    html+="</table></div>";
   }
-  document.getElementById("cfg").innerHTML=html;
+  document.getElementById("cfg").innerHTML=html||"<p class=muted>No config loaded.</p>";
 }
-async function reload(){
-  await fetch("/api/config/reload",{method:"POST"});
-  document.getElementById("msg").textContent=" ✅ Reloaded";
-  setTimeout(()=>document.getElementById("msg").textContent="",3000);
+async function reloadCfg(){
+  await fetch("/api/config/reload",{method:"POST"}).catch(()=>{});
+  const m=document.getElementById("msg");
+  m.textContent=" ✅ Reloaded";
+  setTimeout(()=>m.textContent="",3000);
   load();
 }
 load();

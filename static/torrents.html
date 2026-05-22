@@ -18,34 +18,56 @@
   </div>
 </nav>
 <main class="container">
-  <h1>Torrents</h1>
-  <table id="t"><thead><tr>
-    <th>Hash</th><th>CumDL</th><th>RealUL</th><th>CumUL (SentUL)</th><th>Ratio</th><th>Target</th><th>Progress</th><th>Ann#</th>
-  </tr></thead><tbody id="tbody"></tbody></table>
+  <h1>Torrents <span id="count" class="badge"></span></h1>
+  <table>
+    <thead><tr>
+      <th>Hash</th><th>CumDL</th><th>RealUL</th><th>CumUL (SentUL)</th><th>Ratio</th><th>Target</th><th>Progress</th><th>Ann#</th><th>Status</th>
+    </tr></thead>
+    <tbody id="tbody"></tbody>
+  </table>
 </main>
 <script>
+function fmt(b){ return b && b>0 ? (b/1e6).toFixed(1)+" MB" : "0 MB"; }
+const TARGET = 1.63;
+
 async function load(){
-  const stats = await fetch("/api/stats").then(r=>r.json());
+  let stats={}, health={stalled:[],anomalies:[]};
+  try { stats  = await fetch("/api/stats").then(r=>r.json()); } catch(e){}
+  try { health = await fetch("/api/health").then(r=>r.json()); } catch(e){}
+
+  const entries = Object.entries(stats);
+  document.getElementById("count").textContent = entries.length;
   const tbody = document.getElementById("tbody");
   tbody.innerHTML = "";
-  for(const [ih, d] of Object.entries(stats)){
-    const ratio = d.cumul_rep_dl>0?(d.cumul_rep_ul/d.cumul_rep_dl).toFixed(3):"—";
-    const target = 1.63;
-    const pct = d.cumul_rep_dl>0?Math.min(100,(d.cumul_rep_ul/d.cumul_rep_dl/target*100)).toFixed(0):0;
+
+  for(const [ih, d] of entries){
+    const ratio   = d.cumul_rep_dl>0 ? d.cumul_rep_ul/d.cumul_rep_dl : null;
+    const ratioStr= ratio!==null ? ratio.toFixed(3) : "—";
+    const pct     = ratio!==null ? Math.min(100, ratio/TARGET*100).toFixed(0) : 0;
+    const stalled = (health.stalled||[]).includes(ih);
+    const anomaly = (health.anomalies||[]).includes(ih);
+    const status  = stalled
+      ? "<span class=\'tag stall\'>STALL</span>"
+      : anomaly
+        ? "<span class=\'tag warn\'>ANOMALY</span>"
+        : "<span class=\'tag ok\'>OK</span>";
     tbody.innerHTML += `<tr>
       <td class="mono">${ih}</td>
       <td>${fmt(d.cumul_rep_dl)}</td>
       <td>${fmt(d.cumul_real_ul)}</td>
       <td>${fmt(d.cumul_rep_ul)}</td>
-      <td>${ratio}</td>
-      <td>${target}</td>
-      <td><div class="bar-bg"><div class="bar-fill" style="width:${pct}%"></div></div> ${pct}%</td>
+      <td><span style="font-weight:600">${ratioStr}</span></td>
+      <td>${TARGET}</td>
+      <td>
+        <div class="bar-bg"><div class="bar-fill" style="width:${pct}%"></div></div>
+        <span class="bar-pct">${pct}%</span>
+      </td>
       <td>${d.ann_count||0}</td>
+      <td>${status}</td>
     </tr>`;
   }
 }
-function fmt(b){return b?(b/1e6).toFixed(1)+" MB":"0 MB";}
-load(); setInterval(load,30000);
+load(); setInterval(load,15000);
 </script>
 </body>
 </html>

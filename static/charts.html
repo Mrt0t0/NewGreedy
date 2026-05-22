@@ -18,28 +18,38 @@
 </nav>
 <main class="container">
   <h1>Charts</h1>
-  <canvas id="ratioChart" height="120"></canvas>
+  <div class="chart-grid">
+    <div class="chart-card"><h3>Ratio per torrent</h3><canvas id="ratioChart"></canvas></div>
+    <div class="chart-card"><h3>CumUL per torrent (MB)</h3><canvas id="ulChart"></canvas></div>
+  </div>
 </main>
 <script>
+let ratioChart, ulChart;
 async function load(){
-  const stats = await fetch("/api/stats").then(r=>r.json());
-  const labels=[], ratios=[], uls=[], dls=[];
-  for(const [ih, d] of Object.entries(stats)){
-    labels.push(ih);
-    ratios.push(d.cumul_rep_dl>0?(d.cumul_rep_ul/d.cumul_rep_dl).toFixed(3):0);
-    uls.push(((d.cumul_rep_ul||0)/1e6).toFixed(1));
-    dls.push(((d.cumul_rep_dl||0)/1e6).toFixed(1));
-  }
-  new Chart(document.getElementById("ratioChart"),{
+  const stats = await fetch("/api/stats").then(r=>r.json()).catch(()=>({}));
+  const entries = Object.entries(stats);
+  const labels  = entries.map(([ih])=>ih);
+  const ratios  = entries.map(([,d])=> d.cumul_rep_dl>0 ? +(d.cumul_rep_ul/d.cumul_rep_dl).toFixed(3) : 0);
+  const uls     = entries.map(([,d])=> +((d.cumul_rep_ul||0)/1e6).toFixed(1));
+  const colors  = ratios.map(r=> r>=1.5?"rgba(109,170,69,.8)": r>=0.8?"rgba(232,175,52,.8)":"rgba(221,105,116,.8)");
+
+  const opts = {responsive:true, plugins:{legend:{display:false}}};
+
+  if(ratioChart) ratioChart.destroy();
+  ratioChart = new Chart(document.getElementById("ratioChart"),{
     type:"bar",
-    data:{labels,datasets:[
-      {label:"Ratio",data:ratios,backgroundColor:"rgba(1,105,111,0.7)"},
-      {label:"CumUL GB",data:uls.map(v=>v/1000),backgroundColor:"rgba(1,105,111,0.3)"},
-    ]},
-    options:{responsive:true,plugins:{legend:{position:"top"}}}
+    data:{labels, datasets:[{label:"Ratio",data:ratios,backgroundColor:colors}]},
+    options:{...opts, scales:{y:{beginAtZero:true, max:Math.max(2, ...ratios)+0.2}}}
+  });
+
+  if(ulChart) ulChart.destroy();
+  ulChart = new Chart(document.getElementById("ulChart"),{
+    type:"bar",
+    data:{labels, datasets:[{label:"CumUL MB",data:uls,backgroundColor:"rgba(79,152,163,.7)"}]},
+    options:{...opts}
   });
 }
-load();
+load(); setInterval(load, 30000);
 </script>
 </body>
 </html>

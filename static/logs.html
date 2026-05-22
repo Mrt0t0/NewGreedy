@@ -10,23 +10,88 @@
 <nav class="navbar">
   <span class="brand">🟢 NewGreedy <span class="ver">v1.5.1</span></span>
   <div class="nav-links">
-    <a href="/">Dashboard</a><a href="/static/torrents.html">Torrents</a>
-    <a href="/static/charts.html">Charts</a><a href="/static/config.html">Config</a>
+    <a href="/">Dashboard</a>
+    <a href="/static/torrents.html">Torrents</a>
+    <a href="/static/charts.html">Charts</a>
+    <a href="/static/config.html">Config</a>
     <a href="/static/logs.html" class="active">Logs</a>
   </div>
 </nav>
 <main class="container">
   <h1>Live Logs</h1>
-  <p class="muted">Logs are printed to stdout. Connect to the server via SSH or Docker to view them live.</p>
-  <div id="stats-summary"></div>
+  <div class="log-toolbar">
+    <div id="health-summary" class="muted"></div>
+    <label class="log-opt"><input type="checkbox" id="autoScroll" checked> Auto-scroll</label>
+    <label class="log-opt"><input type="checkbox" id="filterStag"> STAG only</label>
+    <button class="btn btn-sm" onclick="clearLog()">Clear</button>
+  </div>
+  <div id="log-box"></div>
+  <div id="ws-status" class="ws-badge">⏳ Connecting…</div>
 </main>
 <script>
-async function load(){
-  const h = await fetch("/api/health").then(r=>r.json());
-  document.getElementById("stats-summary").innerHTML =
-    `<p>Tracked: <strong>${h.total}</strong> | Stalled: <strong>${(h.stalled||[]).length}</strong> | Anomalies: <strong>${(h.anomalies||[]).length}</strong></p>`;
+const box = document.getElementById("log-box");
+const wsStatus = document.getElementById("ws-status");
+let lines = [];
+
+function colorLine(l){
+  if(l.includes("[STALL]")) return "log-stall";
+  if(l.includes("[STAG]"))  return "log-stag";
+  if(l.includes("[ERROR]") || l.includes("ERROR")) return "log-err";
+  if(l.includes("SEEDING"))     return "log-seed";
+  if(l.includes("DOWNLOADING")) return "log-dl";
+  return "";
 }
-load(); setInterval(load, 10000);
+
+function addLine(l){
+  const filter = document.getElementById("filterStag").checked;
+  if(filter && !l.includes("[STAG]") && !l.includes("[STALL]")) return;
+  lines.push(l);
+  if(lines.length > 500) lines.shift();
+  render();
+}
+
+function render(){
+  box.innerHTML = lines.map(l=>`<div class="log-line ${colorLine(l)}">${escHtml(l)}</div>`).join("");
+  if(document.getElementById("autoScroll").checked) box.scrollTop = box.scrollHeight;
+}
+
+function escHtml(s){ return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+function clearLog(){ lines=[]; box.innerHTML=""; }
+
+document.getElementById("filterStag").addEventListener("change", render);
+
+async function loadHealth(){
+  try {
+    const h = await fetch("/api/health").then(r=>r.json());
+    document.getElementById("health-summary").textContent =
+      `Tracked: ${h.total}  |  Stalled: ${(h.stalled||[]).length}  |  Anomalies: ${(h.anomalies||[]).length}`;
+  } catch(e){}
+}
+
+async function loadInitialLogs(){
+  try {
+    const data = await fetch("/api/logs?lines=150").then(r=>r.json());
+    (data.lines||[]).forEach(l => addLine(l.trim()));
+  } catch(e){}
+}
+
+function connectWS(){
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const ws = new WebSocket(`${proto}://${location.host}/ws/logs`);
+  ws.onopen  = ()=>{ wsStatus.textContent="🟢 Live"; wsStatus.className="ws-badge ws-ok"; };
+  ws.onmessage = e => addLine(e.data);
+  ws.onclose = ()=>{
+    wsStatus.textContent="🔴 Disconnected — retry in 5s";
+    wsStatus.className="ws-badge ws-err";
+    setTimeout(connectWS, 5000);
+  };
+  ws.onerror = ()=> ws.close();
+}
+
+loadHealth();
+loadInitialLogs();
+connectWS();
+setInterval(loadHealth, 10000);
 </script>
 </body>
 </html>

@@ -1,7 +1,7 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, HTMLResponse
-import configparser, json, os, pathlib, logging
+import configparser, json, os, pathlib, logging, asyncio
 
 app = FastAPI(title="NewGreedy Web UI")
 _cfg = None
@@ -12,9 +12,25 @@ def set_config(c):
     _cfg = c
 
 STATS_FILE = "stats.json"
+LOG_FILE   = "newgreedy.log"
 STATIC_DIR = pathlib.Path(__file__).parent / "static"
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+VALID_HASH_RE = __import__("re").compile(r"^[0-9a-f]{8,40}$")
+
+def _load_stats():
+    try:
+        with open(STATS_FILE) as f:
+            raw = json.load(f)
+        return {
+            k: v for k, v in raw.items()
+            if VALID_HASH_RE.match(k)
+            and isinstance(v, dict)
+            and "cumul_rep_ul" in v
+        }
+    except Exception:
+        return {}
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
@@ -23,27 +39,24 @@ async def index():
 
 @app.get("/api/stats")
 async def api_stats():
-    try:
-        with open(STATS_FILE) as f:
-            return json.load(f)
-    except Exception:
-        return {}
+    return _load_stats()
 
 @app.get("/api/health")
 async def api_health():
+    data = _load_stats()
+    stalled   = [ih for ih, d in data.items() if d.get("stalled", False)]
+    anomalies = [ih for ih, d in data.items()
+                 if d.get("cumul_rep_ul", 0) < d.get("prev_rep_ul", 0)]
+    return {"total": len(data), "stalled": stalled, "anomalies": anomalies}
+
+@app.get("/api/logs")
+async def api_logs(lines: int = 100):
     try:
-        with open(STATS_FILE) as f:
-            data = json.load(f)
-        stalled = [ih for ih, d in data.items() if d.get("stalled", False)]
-        anomalies = []
-        for ih, d in data.items():
-            cum_ul = d.get("cumul_rep_ul", 0)
-            prev   = d.get("prev_rep_ul", 0)
-            if cum_ul < prev:
-                anomalies.append(ih)
-        return {"total": len(data), "stalled": stalled, "anomalies": anomalies}
+        with open(LOG_FILE) as f:
+            all_lines = f.readlines()
+        return {"lines": all_lines[-lines:]}
     except Exception:
-        return {"total": 0, "stalled": [], "anomalies": []}
+        return {"lines": []}
 
 @app.get("/api/config")
 async def api_config():
@@ -56,3 +69,27 @@ async def api_config_reload():
     if _cfg:
         _cfg.read("config.ini")
     return {"status": "reloaded"}
+
+_ws_clients = []
+
+@app.websocket("/ws/logs")
+async def ws_logs(ws: WebSocket):
+    await ws.accept()
+    _ws_clients.append(ws)
+    try:
+        last_pos = 0
+        while True:
+            try:
+                with open(LOG_FILE) as f:
+                    f.seek(last_pos)
+                    chunk = f.read()
+                    last_pos = f.tell()
+                if chunk:
+                    for line in chunk.splitlines():
+                        if line.strip():
+                            await ws.send_text(line)
+            except Exception:
+                pass
+            await asyncio.sleep(1)
+    except WebSocketDisconnect:
+        _ws_clients.remove(ws)

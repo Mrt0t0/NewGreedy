@@ -2,6 +2,15 @@ import random, math, time, json, re, logging, hashlib, struct
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 from mitmproxy import http
 
+LOG_FILE = "newgreedy.log"
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(LOG_FILE, encoding="utf-8"),
+    ]
+)
 logger = logging.getLogger("NewGreedy")
 
 PEER_ID_PREFIXES = [
@@ -64,16 +73,15 @@ class TorrentStats:
         base_target = cfg.getfloat("spoofing", "target_ratio", fallback=1.5)
         self._target_ratio = base_target + self._target_buf
 
-        self._cumul_rep_ul = 0.0
-        self._cumul_rep_dl = 0.0
+        self._cumul_rep_ul  = 0.0
+        self._cumul_rep_dl  = 0.0
         self._cumul_real_ul = 0.0
-        self._ann_count    = 0
+        self._ann_count     = 0
         self._zero_dl_count = 0
-        self._is_stalled   = False
-        self._session_started = False
-        self._peer_id      = _rand_peer_id()
-        self._ua           = _ua_for_prefix(self._peer_id[:8])
-        self._prev_rep_ul  = 0.0
+        self._is_stalled    = False
+        self._peer_id       = _rand_peer_id()
+        self._ua            = _ua_for_prefix(self._peer_id[:8])
+        self._prev_rep_ul   = 0.0
 
     def _smart_stagnation(self, ann_count, ratio_progress):
         if ann_count < self._min_ann_stag:
@@ -92,12 +100,10 @@ class TorrentStats:
             if real_ul > 0:
                 bonus = real_ul * random.uniform(1.2, 1.6)
                 bonus = min(bonus, self._max_speed * interval)
-                new_cumul = self._cumul_rep_ul + bonus
-                return new_cumul, False
+                return self._cumul_rep_ul + bonus, False
             seed_inc = min(self._seed_credit * random.uniform(0.8, 1.2),
                            self._max_speed * interval)
-            new_cumul = self._cumul_rep_ul + seed_inc
-            return new_cumul, False
+            return self._cumul_rep_ul + seed_inc, False
 
         target_ul = cumul_dl * self._target_ratio
         ratio_progress = self._cumul_rep_ul / target_ul if target_ul > 0 else 1.0
@@ -108,8 +114,7 @@ class TorrentStats:
         remaining = target_ul - self._cumul_rep_ul
         if remaining <= 0:
             plateau_inc = real_ul * random.uniform(0.9, 1.1) if real_ul > 0 else 0
-            new_cumul = self._cumul_rep_ul + plateau_inc
-            return new_cumul, False
+            return self._cumul_rep_ul + plateau_inc, False
 
         decay = math.exp(-0.08 * max(ann_count - 1, 0))
         effective_catch_up = self._catch_up * (1 + 0.5 * decay)
@@ -124,7 +129,7 @@ class TorrentStats:
         return new_cumul, False
 
     def compute(self, real_ul_bytes, real_dl_bytes, interval, event=None):
-        self._ann_count   += 1
+        self._ann_count    += 1
         self._cumul_real_ul += real_ul_bytes
         self._cumul_rep_dl  += real_dl_bytes
 
@@ -162,17 +167,15 @@ class NewGreedyAddon:
         self._min_interval = cfg.getint("advanced", "min_announce_interval",  fallback=1800)
         self._wl = [x.strip() for x in cfg.get("anti_detection", "tracker_whitelist", fallback="").split(",") if x.strip()]
         self._bl = [x.strip() for x in cfg.get("anti_detection", "tracker_blacklist", fallback="").split(",") if x.strip()]
-        self._spoof_ua   = cfg.getboolean("anti_detection", "spoof_user_agent", fallback=True)
-        self._spoof_pid  = cfg.getboolean("anti_detection", "spoof_peer_id",    fallback=True)
-        self._spoof_peers= cfg.getboolean("anti_detection", "spoof_peers",      fallback=True)
-        self._spoof_port = cfg.getboolean("anti_detection", "spoof_port",       fallback=True)
-        self._spoof_hdr  = cfg.getboolean("anti_detection", "spoof_headers",    fallback=True)
+        self._spoof_ua    = cfg.getboolean("anti_detection", "spoof_user_agent", fallback=True)
+        self._spoof_pid   = cfg.getboolean("anti_detection", "spoof_peer_id",    fallback=True)
+        self._spoof_peers = cfg.getboolean("anti_detection", "spoof_peers",      fallback=True)
+        self._spoof_port  = cfg.getboolean("anti_detection", "spoof_port",       fallback=True)
+        self._spoof_hdr   = cfg.getboolean("anti_detection", "spoof_headers",    fallback=True)
         self._intercept_scrape = cfg.getboolean("anti_detection", "intercept_scrape", fallback=True)
         port_range = cfg.get("anti_detection", "port_range", fallback="6881-6999")
         lo, hi = port_range.split("-")
         self._port_lo, self._port_hi = int(lo), int(hi)
-        self._multi_delay_min = cfg.getfloat("advanced", "multi_tracker_delay_min", fallback=0.5)
-        self._multi_delay_max = cfg.getfloat("advanced", "multi_tracker_delay_max", fallback=8.0)
         self._event_anomaly_p = cfg.getfloat("advanced", "event_anomaly_probability", fallback=0.03)
         self._jitter_pct = cfg.getfloat("advanced", "interval_jitter_pct", fallback=0.08)
         self._last_seen  = {}
@@ -185,20 +188,28 @@ class NewGreedyAddon:
             self._load_stats()
 
     def _load_stats(self):
+        VALID = re.compile(r"^[0-9a-f]{8,40}$")
         try:
             with open(self._stats_file) as f:
-                data = json.load(f)
-            for ih, d in data.items():
+                raw = json.load(f)
+            loaded = 0
+            for k, d in raw.items():
+                if not VALID.match(k):
+                    continue
+                if not isinstance(d, dict) or "cumul_rep_ul" not in d:
+                    continue
                 s = TorrentStats(self._cfg)
-                s._cumul_rep_ul  = d.get("cumul_rep_ul", 0.0)
-                s._cumul_rep_dl  = d.get("cumul_rep_dl", 0.0)
+                s._cumul_rep_ul  = d.get("cumul_rep_ul",  0.0)
+                s._cumul_rep_dl  = d.get("cumul_rep_dl",  0.0)
                 s._cumul_real_ul = d.get("cumul_real_ul", 0.0)
-                s._ann_count     = d.get("ann_count", 0)
-                s._prev_rep_ul   = d.get("cumul_rep_ul", 0.0)
-                self._stats[ih]  = s
-            logger.info("Stats loaded: %d torrent(s) tracked", len(self._stats))
-        except Exception:
-            pass
+                s._ann_count     = d.get("ann_count",     0)
+                s._prev_rep_ul   = d.get("cumul_rep_ul",  0.0)
+                s._is_stalled    = d.get("stalled",       False)
+                self._stats[k]   = s
+                loaded += 1
+            logger.info("Stats loaded: %d torrent(s) tracked", loaded)
+        except Exception as e:
+            logger.warning("Stats load: %s", e)
 
     def _save_stats(self):
         try:
@@ -208,6 +219,8 @@ class NewGreedyAddon:
                     "cumul_rep_dl":  s._cumul_rep_dl,
                     "cumul_real_ul": s._cumul_real_ul,
                     "ann_count":     s._ann_count,
+                    "stalled":       s._is_stalled,
+                    "prev_rep_ul":   s._prev_rep_ul,
                 }
                 for ih, s in self._stats.items()
             }
@@ -219,9 +232,6 @@ class NewGreedyAddon:
     def _is_announce(self, url):
         p = urlparse(url)
         return "announce" in p.path and "scrape" not in p.path
-
-    def _is_scrape(self, url):
-        return "scrape" in urlparse(url).path
 
     def _tracker_allowed(self, url):
         domain = _tracker_domain(url)
@@ -250,10 +260,8 @@ class NewGreedyAddon:
         url = flow.request.pretty_url
         if not self._tracker_allowed(url):
             return
-
-        if self._intercept_scrape and self._is_scrape(url):
+        if self._intercept_scrape and "scrape" in urlparse(url).path:
             return
-
         if not self._is_announce(url):
             return
 
@@ -268,19 +276,18 @@ class NewGreedyAddon:
             ih_hex = info_hash.encode("latin-1").hex() if len(info_hash) == 20 else info_hash[:8]
         ih_key = ih_hex[:8]
 
-        now = time.time()
+        now  = time.time()
         last = self._last_seen.get(ih_key + domain, 0)
         interval = max(now - last, self._min_interval) if last > 0 else self._min_interval
         interval = self._jitter_interval(interval)
         self._last_seen[ih_key + domain] = now
 
-        event    = qs.get("event", [""])[0]
-        real_ul  = self._parse_int(qs, "uploaded")
-        real_dl  = self._parse_int(qs, "downloaded")
-        left     = self._parse_int(qs, "left")
+        event   = qs.get("event", [""])[0]
+        real_ul = self._parse_int(qs, "uploaded")
+        real_dl = self._parse_int(qs, "downloaded")
+        left    = self._parse_int(qs, "left")
 
         st = self._get_stats(ih_key)
-
         new_ul, new_dl, delta_ul, is_stag, corrupt_val = st.compute(
             real_ul, real_dl, interval, event
         )
@@ -290,9 +297,9 @@ class NewGreedyAddon:
         tracker_dl = tracker_cumul.get("dl", 0.0) + real_dl
         tracker_ratio = tracker_ul / tracker_dl if tracker_dl > 0 else 0
         if tracker_ratio > self._max_global_r and tracker_dl > 0:
-            cap = self._max_global_r * tracker_dl
-            if tracker_ul > cap:
-                excess = tracker_ul - cap
+            cap    = self._max_global_r * tracker_dl
+            excess = tracker_ul - cap
+            if excess > 0:
                 new_ul = max(st._prev_rep_ul, new_ul - excess)
         tracker_cumul["ul"] = tracker_ul
         tracker_cumul["dl"] = tracker_dl
@@ -302,9 +309,8 @@ class NewGreedyAddon:
             if ih_key not in self._peer_ids:
                 pid = _rand_peer_id()
                 self._peer_ids[ih_key] = pid
-                self._uas[ih_key] = _ua_for_prefix(pid[:8])
-            pid = self._peer_ids[ih_key]
-            qs["peer_id"] = [pid]
+                self._uas[ih_key]      = _ua_for_prefix(pid[:8])
+            qs["peer_id"] = [self._peer_ids[ih_key]]
 
         if self._spoof_port:
             if ih_key not in self._ports:
@@ -312,9 +318,8 @@ class NewGreedyAddon:
             qs["port"] = [str(self._ports[ih_key])]
 
         if self._spoof_peers:
-            peers_factor = random.uniform(0.85, 1.15)
             numwant = self._parse_int(qs, "numwant", 50)
-            qs["numwant"] = [str(int(numwant * peers_factor))]
+            qs["numwant"] = [str(int(numwant * random.uniform(0.85, 1.15)))]
 
         if corrupt_val is not None:
             qs["corrupt"] = [str(corrupt_val)]
@@ -323,45 +328,44 @@ class NewGreedyAddon:
             qs["event"] = ["started"]
 
         res_bytes = struct.pack(">I", random.randint(1, 4096))
-        dl_bytes  = real_dl + res_bytes[0]
-
         qs["uploaded"]   = [str(int(new_ul))]
-        qs["downloaded"] = [str(int(new_dl + dl_bytes))]
+        qs["downloaded"] = [str(int(new_dl + res_bytes[0]))]
 
         new_query = urlencode({k: v[0] for k, v in qs.items()})
         flow.request.path = parsed.path + "?" + new_query
 
         if self._spoof_hdr:
             ua = self._uas.get(ih_key, "qBittorrent/4.6.8") if self._spoof_ua else                  self._cfg.get("anti_detection", "user_agent_value", fallback="qBittorrent/4.6.8")
-            flow.request.headers["User-Agent"]  = ua
-            flow.request.headers["Accept"]      = _accept_for_ua(ua)
+            flow.request.headers["User-Agent"]      = ua
+            flow.request.headers["Accept"]          = _accept_for_ua(ua)
             flow.request.headers["Accept-Language"] = "en-US,en;q=0.9"
-            flow.request.headers["Connection"]  = "keep-alive"
+            flow.request.headers["Connection"]      = "keep-alive"
 
-        mode = "SEEDING    " if left == 0 else "DOWNLOADING"
-        cum_dl_mb  = st._cumul_rep_dl / 1e6
-        real_ul_mb = real_ul / 1e6
-        cum_ul_mb  = new_ul / 1e6
-        delta_mb   = delta_ul / 1e6
-        ratio      = new_ul / st._cumul_rep_dl if st._cumul_rep_dl > 0 else 0.0
-        target_ul  = st._cumul_rep_dl * st._target_ratio
-        remaining  = max(0, target_ul - new_ul)
-        avg_delta  = delta_ul if st._ann_count <= 1 else (new_ul / st._ann_count)
-        eta_ann    = int(remaining / avg_delta) if avg_delta > 0 else 0
+        mode     = "SEEDING    " if left == 0 else "DOWNLOADING"
+        cum_dl   = st._cumul_rep_dl / 1e6
+        rul_mb   = real_ul / 1e6
+        cum_ul   = new_ul / 1e6
+        delta_mb = delta_ul / 1e6
+        ratio    = new_ul / st._cumul_rep_dl if st._cumul_rep_dl > 0 else 0.0
 
-        stag_tag  = " [STAG]"  if is_stag         else ""
-        stall_tag = " [STALL]" if st._is_stalled   else ""
+        target_ul = st._cumul_rep_dl * st._target_ratio
+        remaining = max(0, target_ul - new_ul)
+        avg_delta = new_ul / st._ann_count if st._ann_count > 1 else delta_ul
+        eta_ann   = int(remaining / avg_delta) if avg_delta > 0 else 0
+
+        stag_tag  = " [STAG]"  if is_stag       else ""
+        stall_tag = " [STALL]" if st._is_stalled else ""
 
         if st._cumul_rep_dl > 0:
             logger.info(
                 "[%s] %s | DL:%8.2fMB | RealUL:%8.2fMB | CumUL:%8.2fMB | +DUL:%7.2fMB | SentUL:%8.2fMB | Ratio:%.3f ETA:~%dann | Ann#%d%s%s",
-                mode, ih_key, cum_dl_mb, real_ul_mb, cum_ul_mb, delta_mb, cum_ul_mb,
+                mode, ih_key, cum_dl, rul_mb, cum_ul, delta_mb, cum_ul,
                 ratio, eta_ann, st._ann_count, stag_tag, stall_tag
             )
         else:
             logger.info(
                 "[%s] %s | DL:%8.2fMB | RealUL:%8.2fMB | CumUL:%8.2fMB | +DUL:%7.2fMB | SeedUL:%8.2fMB | Ann#%d%s%s",
-                mode, ih_key, cum_dl_mb, real_ul_mb, cum_ul_mb, delta_mb, cum_ul_mb,
+                mode, ih_key, cum_dl, rul_mb, cum_ul, delta_mb, cum_ul,
                 st._ann_count, stag_tag, stall_tag
             )
 
