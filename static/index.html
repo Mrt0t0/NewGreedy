@@ -23,14 +23,14 @@
   <div class="kpi-grid" id="kpis"></div>
   <table id="torrent-table">
     <thead><tr>
-      <th>Hash</th><th>CumDL</th><th>CumUL (SentUL)</th><th>Ratio</th><th>Ann#</th><th>Status</th>
+      <th>Hash</th><th>Mode</th><th>CumDL</th><th>SentUL</th><th>Ratio</th><th>Ann#</th><th>Status</th>
     </tr></thead>
     <tbody id="tbody"></tbody>
   </table>
 </main>
 <script src="/static/app.js"></script>
 <script>
-function fmt(b){ return b && b>0 ? (b/1e6).toFixed(1)+" MB" : "0 MB"; }
+function fmt(b){ return b && b>1e4 ? (b/1e6).toFixed(1)+" MB" : "0 MB"; }
 function ratioColor(r){ if(r>=1.5) return "var(--ok)"; if(r>=0.8) return "var(--warn)"; return "var(--err)"; }
 
 async function load(){
@@ -40,44 +40,74 @@ async function load(){
 
   const banner = document.getElementById("health-banner");
   banner.innerHTML = "";
-  if(health.stalled && health.stalled.length)
+  if(health.stalled  && health.stalled.length)
     banner.innerHTML += `<div class="alert warn">⚠️ Stalled: ${health.stalled.join(", ")}</div>`;
   if(health.anomalies && health.anomalies.length)
     banner.innerHTML += `<div class="alert err">🔴 Anomalies: ${health.anomalies.join(", ")}</div>`;
 
-  let totalUL=0, totalDL=0;
+  let totalUL=0, totalDL=0, seedCount=0, dlCount=0;
   const entries = Object.entries(stats);
   const tbody = document.getElementById("tbody");
   tbody.innerHTML = "";
 
   for(const [ih, d] of entries){
-    totalUL += d.cumul_rep_ul||0;
-    totalDL += d.cumul_rep_dl||0;
-    const ratio  = d.cumul_rep_dl>0 ? (d.cumul_rep_ul/d.cumul_rep_dl) : null;
+    const ul  = d.cumul_rep_ul || 0;
+    const dl  = d.cumul_rep_dl || 0;
+    totalUL  += ul;
+    totalDL  += dl;
+    const isPureSeed = dl === 0;
+    if(isPureSeed) seedCount++; else dlCount++;
+
+    const ratio    = dl > 0 ? ul/dl : null;
     const ratioStr = ratio !== null ? ratio.toFixed(3) : "—";
+    const color    = ratio !== null ? ratioColor(ratio) : "var(--ok)"; // seeders = vert
     const stalled  = (health.stalled||[]).includes(ih);
-    const color    = ratio !== null ? ratioColor(ratio) : "";
+    const mode     = isPureSeed
+      ? "<span class='tag seed'>SEED</span>"
+      : "<span class='tag dl'>DL+SEED</span>";
+    const dlCell   = isPureSeed
+      ? "<span class='muted'>—</span>"
+      : fmt(dl);
+
     tbody.innerHTML += `<tr>
       <td class="mono">${ih}</td>
-      <td>${fmt(d.cumul_rep_dl)}</td>
-      <td>${fmt(d.cumul_rep_ul)}</td>
+      <td>${mode}</td>
+      <td>${dlCell}</td>
+      <td>${fmt(ul)}</td>
       <td style="color:${color};font-weight:600">${ratioStr}</td>
       <td>${d.ann_count||0}</td>
       <td>${stalled
-        ? "<span class=\'tag stall\'>STALL</span>"
-        : "<span class=\'tag ok\'>OK</span>"}</td>
+        ? "<span class='tag stall'>STALL</span>"
+        : "<span class='tag ok'>OK</span>"}</td>
     </tr>`;
   }
 
-  const globalRatio = totalDL>0 ? (totalUL/totalDL).toFixed(3) : "—";
+  // Global Ratio = uniquement sur torrents avec DL connu
+  const globalRatio = totalDL > 0 ? (totalUL/totalDL).toFixed(3) : "—";
+
   document.getElementById("kpis").innerHTML = `
-    <div class="kpi"><div class="kpi-val">${entries.length}</div><div class="kpi-lbl">Torrents</div></div>
-    <div class="kpi"><div class="kpi-val">${fmt(totalUL)}</div><div class="kpi-lbl">Total SentUL</div></div>
-    <div class="kpi"><div class="kpi-val">${fmt(totalDL)}</div><div class="kpi-lbl">Total DL</div></div>
-    <div class="kpi"><div class="kpi-val">${globalRatio}</div><div class="kpi-lbl">Global Ratio</div></div>
+    <div class="kpi">
+      <div class="kpi-val">${entries.length}</div>
+      <div class="kpi-lbl">Torrents</div>
+      <div class="kpi-sub">${seedCount} seed · ${dlCount} dl</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-val">${fmt(totalUL)}</div>
+      <div class="kpi-lbl">Total SentUL</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-val">${fmt(totalDL)}</div>
+      <div class="kpi-lbl">Total DL connu</div>
+      <div class="kpi-sub">${dlCount > 0 ? dlCount+" torrent(s)" : "seeders purs"}</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-val">${globalRatio}</div>
+      <div class="kpi-lbl">Global Ratio</div>
+      <div class="kpi-sub">${totalDL > 0 ? "sur torrents DL connu" : "seeders purs"}</div>
+    </div>
   `;
 }
-load(); setInterval(load,15000);
+load(); setInterval(load, 15000);
 </script>
 </body>
 </html>

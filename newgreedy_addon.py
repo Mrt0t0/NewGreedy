@@ -137,7 +137,12 @@ class TorrentStats:
         self._cumul_real_ul += real_ul
         # real_dl = valeur CUMULEE envoyée par le client (qBittorrent)
         # → stocker le MAX observé, pas accumuler (sinon x announce = explosion)
-        self._cumul_rep_dl  = max(self._cumul_rep_dl, real_dl)
+        # Garde-fou anti-doublon (stats.json chargé depuis ancienne version) :
+        # si la valeur persistée est > 1.5× le real_dl actuel → on prend real_dl
+        if real_dl > 0 and self._cumul_rep_dl > real_dl * 1.5:
+            self._cumul_rep_dl = real_dl   # corrige artefact doublon
+        else:
+            self._cumul_rep_dl = max(self._cumul_rep_dl, real_dl)
         if real_dl == 0 and event not in ("started","stopped"):
             self._zero_dl_count += 1
             if self._zero_dl_count >= self._stall_thr: self._is_stalled = True

@@ -79,3 +79,9 @@ tr:hover td{background:var(--surface)}
 @media(max-width:768px){.chart-grid{grid-template-columns:1fr}}
 
 canvas{background:transparent !important}
+
+/* Tags mode torrent */
+.tag.seed  { background: var(--primary-faint, #1a3a2a); color: var(--ok, #6daa45); }
+.tag.dl    { background: #1a2a3a; color: #5591c7; }
+/* KPI sub-label */
+.kpi-sub   { font-size: var(--text-xs); color: var(--color-text-muted); margin-top: 2px; }
