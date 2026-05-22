@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Logs — NewGreedy</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<nav class="navbar">
+  <span class="brand">🟢 NewGreedy <span class="ver">v1.5.1</span></span>
+  <div class="nav-links">
+    <a href="/">Dashboard</a><a href="/static/torrents.html">Torrents</a>
+    <a href="/static/charts.html">Charts</a><a href="/static/config.html">Config</a>
+    <a href="/static/logs.html" class="active">Logs</a>
+  </div>
+</nav>
+<main class="container">
+  <h1>Live Logs</h1>
+  <p class="muted">Logs are printed to stdout. Connect to the server via SSH or Docker to view them live.</p>
+  <div id="stats-summary"></div>
+</main>
+<script>
+async function load(){
+  const h = await fetch("/api/health").then(r=>r.json());
+  document.getElementById("stats-summary").innerHTML =
+    `<p>Tracked: <strong>${h.total}</strong> | Stalled: <strong>${(h.stalled||[]).length}</strong> | Anomalies: <strong>${(h.anomalies||[]).length}</strong></p>`;
+}
+load(); setInterval(load, 10000);
+</script>
+</body>
+</html>

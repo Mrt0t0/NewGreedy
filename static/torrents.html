@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Torrents — NewGreedy</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<nav class="navbar">
+  <span class="brand">🟢 NewGreedy <span class="ver">v1.5.1</span></span>
+  <div class="nav-links">
+    <a href="/">Dashboard</a>
+    <a href="/static/torrents.html" class="active">Torrents</a>
+    <a href="/static/charts.html">Charts</a>
+    <a href="/static/config.html">Config</a>
+    <a href="/static/logs.html">Logs</a>
+  </div>
+</nav>
+<main class="container">
+  <h1>Torrents</h1>
+  <table id="t"><thead><tr>
+    <th>Hash</th><th>CumDL</th><th>RealUL</th><th>CumUL (SentUL)</th><th>Ratio</th><th>Target</th><th>Progress</th><th>Ann#</th>
+  </tr></thead><tbody id="tbody"></tbody></table>
+</main>
+<script>
+async function load(){
+  const stats = await fetch("/api/stats").then(r=>r.json());
+  const tbody = document.getElementById("tbody");
+  tbody.innerHTML = "";
+  for(const [ih, d] of Object.entries(stats)){
+    const ratio = d.cumul_rep_dl>0?(d.cumul_rep_ul/d.cumul_rep_dl).toFixed(3):"—";
+    const target = 1.63;
+    const pct = d.cumul_rep_dl>0?Math.min(100,(d.cumul_rep_ul/d.cumul_rep_dl/target*100)).toFixed(0):0;
+    tbody.innerHTML += `<tr>
+      <td class="mono">${ih}</td>
+      <td>${fmt(d.cumul_rep_dl)}</td>
+      <td>${fmt(d.cumul_real_ul)}</td>
+      <td>${fmt(d.cumul_rep_ul)}</td>
+      <td>${ratio}</td>
+      <td>${target}</td>
+      <td><div class="bar-bg"><div class="bar-fill" style="width:${pct}%"></div></div> ${pct}%</td>
+      <td>${d.ann_count||0}</td>
+    </tr>`;
+  }
+}
+function fmt(b){return b?(b/1e6).toFixed(1)+" MB":"0 MB";}
+load(); setInterval(load,30000);
+</script>
+</body>
+</html>

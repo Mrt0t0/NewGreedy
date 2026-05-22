@@ -1,2 +1,4 @@
 mitmproxy>=10.0.0
 requests>=2.28.0
+fastapi>=0.110.0
+uvicorn>=0.29.0

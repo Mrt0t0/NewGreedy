@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Config — NewGreedy</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<nav class="navbar">
+  <span class="brand">🟢 NewGreedy <span class="ver">v1.5.1</span></span>
+  <div class="nav-links">
+    <a href="/">Dashboard</a><a href="/static/torrents.html">Torrents</a>
+    <a href="/static/charts.html">Charts</a>
+    <a href="/static/config.html" class="active">Config</a>
+    <a href="/static/logs.html">Logs</a>
+  </div>
+</nav>
+<main class="container">
+  <h1>Configuration</h1>
+  <div id="cfg"></div>
+  <button onclick="reload()" class="btn">Reload config</button>
+  <span id="msg"></span>
+</main>
+<script>
+async function load(){
+  const cfg = await fetch("/api/config").then(r=>r.json());
+  let html="";
+  for(const [sec, vals] of Object.entries(cfg)){
+    html+=`<h3>[${sec}]</h3><table>`;
+    for(const [k,v] of Object.entries(vals)) html+=`<tr><td class="mono">${k}</td><td>${v}</td></tr>`;
+    html+="</table>";
+  }
+  document.getElementById("cfg").innerHTML=html;
+}
+async function reload(){
+  await fetch("/api/config/reload",{method:"POST"});
+  document.getElementById("msg").textContent=" ✅ Reloaded";
+  setTimeout(()=>document.getElementById("msg").textContent="",3000);
+  load();
+}
+load();
+</script>
+</body>
+</html>

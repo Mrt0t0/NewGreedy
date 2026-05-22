@@ -2,16 +2,10 @@ version: "3.8"
 services:
   newgreedy:
     build: .
-    container_name: newgreedy
-    restart: unless-stopped
     ports:
       - "3456:3456"
+      - "8080:8080"
     volumes:
       - ./config.ini:/app/config.ini
       - ./stats.json:/app/stats.json
-      - newgreedy-ca:/root/.mitmproxy
-    environment:
-      - PYTHONUNBUFFERED=1
-
-volumes:
-  newgreedy-ca:
+    restart: unless-stopped

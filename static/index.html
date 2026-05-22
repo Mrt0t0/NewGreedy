@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NewGreedy v1.5.1</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<nav class="navbar">
+  <span class="brand">🟢 NewGreedy <span class="ver">v1.5.1</span></span>
+  <div class="nav-links">
+    <a href="/">Dashboard</a>
+    <a href="/static/torrents.html">Torrents</a>
+    <a href="/static/charts.html">Charts</a>
+    <a href="/static/config.html">Config</a>
+    <a href="/static/logs.html">Logs</a>
+  </div>
+</nav>
+<main class="container">
+  <h1>Dashboard</h1>
+  <div id="health-banner"></div>
+  <div class="kpi-grid" id="kpis"></div>
+  <table id="torrent-table"><thead><tr>
+    <th>Hash</th><th>CumDL</th><th>CumUL</th><th>SentUL</th><th>Ratio</th><th>Ann#</th><th>Status</th>
+  </tr></thead><tbody id="tbody"></tbody></table>
+</main>
+<script src="/static/app.js"></script>
+<script>
+async function load(){
+  const [stats, health] = await Promise.all([
+    fetch("/api/stats").then(r=>r.json()),
+    fetch("/api/health").then(r=>r.json())
+  ]);
+  const banner = document.getElementById("health-banner");
+  if(health.stalled && health.stalled.length > 0)
+    banner.innerHTML = `<div class="alert warn">⚠️ Stalled: ${health.stalled.join(", ")}</div>`;
+  if(health.anomalies && health.anomalies.length > 0)
+    banner.innerHTML += `<div class="alert err">🔴 Anomalies: ${health.anomalies.join(", ")}</div>`;
+  let totalUL=0, totalDL=0, count=0;
+  const tbody = document.getElementById("tbody");
+  tbody.innerHTML = "";
+  for(const [ih, d] of Object.entries(stats)){
+    totalUL += d.cumul_rep_ul||0;
+    totalDL += d.cumul_rep_dl||0;
+    count++;
+    const ratio = d.cumul_rep_dl>0?(d.cumul_rep_ul/d.cumul_rep_dl).toFixed(3):"—";
+    const stalled = (health.stalled||[]).includes(ih);
+    tbody.innerHTML += `<tr>
+      <td class="mono">${ih}</td>
+      <td>${fmt(d.cumul_rep_dl)}</td>
+      <td>${fmt(d.cumul_rep_ul)}</td>
+      <td>${fmt(d.cumul_rep_ul)}</td>
+      <td>${ratio}</td>
+      <td>${d.ann_count||0}</td>
+      <td>${stalled?"<span class=\'tag stall\'>STALL</span>":"<span class=\'tag ok\'>OK</span>"}</td>
+    </tr>`;
+  }
+  document.getElementById("kpis").innerHTML = `
+    <div class="kpi"><div class="kpi-val">${count}</div><div class="kpi-lbl">Torrents</div></div>
+    <div class="kpi"><div class="kpi-val">${fmt(totalUL)}</div><div class="kpi-lbl">Total SentUL</div></div>
+    <div class="kpi"><div class="kpi-val">${fmt(totalDL)}</div><div class="kpi-lbl">Total DL</div></div>
+    <div class="kpi"><div class="kpi-val">${totalDL>0?(totalUL/totalDL).toFixed(3):"—"}</div><div class="kpi-lbl">Global Ratio</div></div>
+  `;
+}
+function fmt(b){return b?(b/1e6).toFixed(1)+" MB":"0 MB";}
+load(); setInterval(load,30000);
+</script>
+</body>
+</html>

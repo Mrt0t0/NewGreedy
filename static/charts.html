@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Charts — NewGreedy</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+</head>
+<body>
+<nav class="navbar">
+  <span class="brand">🟢 NewGreedy <span class="ver">v1.5.1</span></span>
+  <div class="nav-links">
+    <a href="/">Dashboard</a><a href="/static/torrents.html">Torrents</a>
+    <a href="/static/charts.html" class="active">Charts</a>
+    <a href="/static/config.html">Config</a><a href="/static/logs.html">Logs</a>
+  </div>
+</nav>
+<main class="container">
+  <h1>Charts</h1>
+  <canvas id="ratioChart" height="120"></canvas>
+</main>
+<script>
+async function load(){
+  const stats = await fetch("/api/stats").then(r=>r.json());
+  const labels=[], ratios=[], uls=[], dls=[];
+  for(const [ih, d] of Object.entries(stats)){
+    labels.push(ih);
+    ratios.push(d.cumul_rep_dl>0?(d.cumul_rep_ul/d.cumul_rep_dl).toFixed(3):0);
+    uls.push(((d.cumul_rep_ul||0)/1e6).toFixed(1));
+    dls.push(((d.cumul_rep_dl||0)/1e6).toFixed(1));
+  }
+  new Chart(document.getElementById("ratioChart"),{
+    type:"bar",
+    data:{labels,datasets:[
+      {label:"Ratio",data:ratios,backgroundColor:"rgba(1,105,111,0.7)"},
+      {label:"CumUL GB",data:uls.map(v=>v/1000),backgroundColor:"rgba(1,105,111,0.3)"},
+    ]},
+    options:{responsive:true,plugins:{legend:{position:"top"}}}
+  });
+}
+load();
+</script>
+</body>
+</html>

@@ -1,91 +1,52 @@
 #!/usr/bin/env python3
-"""
-NewGreedy v1.4
-Launcher -- starts mitmproxy on a single port (HTTP + HTTPS).
-All logic lives in newgreedy_addon.py.
-UDP tracker announces bypass this proxy entirely by design.
-"""
-
-import configparser, subprocess, sys, logging, threading, shutil
+import configparser, logging, os, signal, sys, threading
 from pathlib import Path
 
-VERSION     = "1.4"
-ADDON       = Path(__file__).parent / "newgreedy_addon.py"
-CONFIG      = Path(__file__).parent / "config.ini"
-GITHUB_REPO = "Mrt0t0/NewGreedy"
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger("NewGreedy")
 
-logging.getLogger().setLevel(logging.WARNING)
-logger = logging.getLogger("newgreedy")
-if not logger.handlers:
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
-    _fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-    _h = logging.StreamHandler(sys.stdout)
-    _h.setFormatter(_fmt)
-    logger.addHandler(_h)
+cfg = configparser.ConfigParser()
+cfg.read("config.ini")
 
+def _sighup(signum, frame):
+    cfg.read("config.ini")
+    logger.info("Config reloaded (SIGHUP)")
 
-def load_port():
-    cfg = configparser.ConfigParser(interpolation=None)
-    cfg.read(CONFIG, encoding="utf-8")
-    return cfg.getint("proxy", "listen_port", fallback=3456)
+signal.signal(signal.SIGHUP, _sighup)
 
-
-def check_update():
+def _start_web():
     try:
-        import requests
-        r = requests.get(
-            f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest", timeout=5
-        )
-        latest = r.json().get("tag_name", "").lstrip("v")
-        if not latest:
-            return
-        def ver(s):
-            try:
-                return tuple(int(x) for x in s.split("."))
-            except Exception:
-                return (0,)
-        if ver(latest) > ver(VERSION):
-            logger.info("New version available: v%s  (run: sudo ./install.sh --update)", latest)
-        else:
-            logger.info("NewGreedy v%s is up to date.", VERSION)
-    except Exception:
-        pass
-
+        import uvicorn
+        from newgreedy_web import app, set_config
+        set_config(cfg)
+        host = cfg.get("web", "web_host", fallback="0.0.0.0")
+        port = cfg.getint("web", "web_port", fallback=8080)
+        uvicorn.run(app, host=host, port=port, log_level="warning")
+    except Exception as e:
+        logger.warning("Web UI not started: %s", e)
 
 def main():
-    logger.info("NewGreedy v%s starting...", VERSION)
-    if not ADDON.exists():
-        logger.error("newgreedy_addon.py not found at %s", ADDON)
-        sys.exit(1)
+    logger.info("NewGreedy v1.5.1 starting...")
+    listen_port = cfg.getint("proxy", "listen_port", fallback=3456)
+    logger.info("Launching mitmproxy on 0.0.0.0:%d  (HTTP + HTTPS)", listen_port)
 
-    port = load_port()
-    logger.info("Launching mitmproxy on 0.0.0.0:%d  (HTTP + HTTPS)", port)
+    web_enabled = cfg.getboolean("web", "web_enabled", fallback=True)
+    if web_enabled:
+        t = threading.Thread(target=_start_web, daemon=True)
+        t.start()
 
-    threading.Thread(target=check_update, daemon=True).start()
-
-    mitmdump = shutil.which("mitmdump")
-    runner   = [mitmdump] if mitmdump else [sys.executable, "-m", "mitmproxy.tools.main"]
-
-    cmd = runner + [
-        "--mode",        "regular",
+    from mitmproxy.tools.main import mitmdump
+    sys.argv = [
+        "mitmdump",
         "--listen-host", "0.0.0.0",
-        "--listen-port", str(port),
-        "--scripts",     str(ADDON),
-        "--set",         "block_global=false",
-        "--set",         "ssl_insecure=true",
-        "--quiet",
+        "--listen-port", str(listen_port),
+        "-s", "newgreedy_addon.py",
     ]
-
-    try:
-        proc = subprocess.run(cmd)
-        sys.exit(proc.returncode)
-    except KeyboardInterrupt:
-        logger.info("Shutdown requested.")
-    except FileNotFoundError:
-        logger.error("mitmproxy not found. Install: pip install mitmproxy")
-        sys.exit(1)
-
+    mitmdump()
 
 if __name__ == "__main__":
     main()
