@@ -284,10 +284,12 @@ class NewGreedyAddon:
             new_ul = max(st._prev_rep_ul, new_ul-(tc["ul"]-self._max_global_r*tc["dl"]))
 
         # ── Construire les patches (uniquement les champs sûrs à modifier) ──
-        patches = {
-            "uploaded":   int(new_ul),
-            "downloaded": int(new_dl + struct.pack(">I", random.randint(1,4096))[0]),
-        }
+        # Ne jamais modifier downloaded sur un seeder pur (left==0, real_dl==0)
+        # certains trackers (bt4g) rejettent downloaded>0 pour un torrent complet
+        is_pure_seeder = (left == 0 and real_dl == 0)
+        patches = {"uploaded": int(new_ul)}
+        if not is_pure_seeder:
+            patches["downloaded"] = int(new_dl + struct.pack(">I", random.randint(1,4096))[0])
 
         if self._spoof_port:
             if ih_key not in self._ports:
@@ -310,9 +312,11 @@ class NewGreedyAddon:
                 pid = _rand_peer_id()
                 self._peer_ids[ih_key] = pid
                 self._uas[ih_key]      = _ua_for_prefix(pid[:8])
-            # Remplacer peer_id dans raw_query via patch bytes
+            # Encoder peer_id : RFC 3986 unreserved = [A-Za-z0-9._~-]
+            # Tout le reste en %XX — identique à qBittorrent/libtorrent
+            _unreserved = frozenset(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
             pid_pct = b"peer_id=" + b"".join(
-                (b"%" + format(b, "02X").encode()) if (b < 45 or b > 122 or b in (47,)) else bytes([b])
+                bytes([b]) if b in _unreserved else (b"%" + format(b, "02X").encode())
                 for b in self._peer_ids[ih_key]
             )
             parts = raw_query.split(b"&")
