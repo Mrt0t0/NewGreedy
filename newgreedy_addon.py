@@ -268,12 +268,13 @@ class NewGreedyAddon:
         qs     = parse_qs(parsed.query, keep_blank_values=True)
 
         raw_ih = qs.get("info_hash", [b""])[0]
-        if isinstance(raw_ih, bytes):
-            ih_hex = raw_ih.hex()
-        elif len(raw_ih) == 20:
-            ih_hex = raw_ih.encode("latin-1").hex()
-        else:
-            ih_hex = raw_ih
+        try:
+            if isinstance(raw_ih, bytes):
+                ih_hex = raw_ih.hex()
+            else:
+                ih_hex = raw_ih.encode("latin-1").hex()
+        except Exception:
+            ih_hex = raw_ih.hex() if isinstance(raw_ih, bytes) else raw_ih
         ih_key = ih_hex[:8]
 
         now      = time.time()
@@ -363,7 +364,7 @@ class NewGreedyAddon:
                 st._ann_count, stag_tag, stall_tag
             )
 
-        if self._persist and st._ann_count % 5 == 0:
+        if self._persist and (st._ann_count == 1 or st._ann_count % 5 == 0):
             self._save_stats()
 
     def done(self):
