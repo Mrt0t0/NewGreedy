@@ -135,7 +135,9 @@ class TorrentStats:
     def compute(self, real_ul, real_dl, interval, event=None):
         self._ann_count     += 1
         self._cumul_real_ul += real_ul
-        self._cumul_rep_dl  += real_dl
+        # real_dl = valeur CUMULEE envoyée par le client (qBittorrent)
+        # → stocker le MAX observé, pas accumuler (sinon x announce = explosion)
+        self._cumul_rep_dl  = max(self._cumul_rep_dl, real_dl)
         if real_dl == 0 and event not in ("started","stopped"):
             self._zero_dl_count += 1
             if self._zero_dl_count >= self._stall_thr: self._is_stalled = True
