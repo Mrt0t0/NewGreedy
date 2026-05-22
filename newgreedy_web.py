@@ -98,11 +98,18 @@ async def ws_logs(ws: WebSocket):
                     for line in chunk.decode("utf-8", errors="replace").splitlines():
                         if line.strip():
                             await ws.send_text(line)
+            except WebSocketDisconnect:
+                break
+            except RuntimeError:
+                break
             except FileNotFoundError:
                 pass
             except Exception as e:
                 logger.debug("ws_logs error: %s", e)
+                break
             await asyncio.sleep(1)
     except WebSocketDisconnect:
+        pass
+    finally:
         if ws in _ws_clients:
             _ws_clients.remove(ws)

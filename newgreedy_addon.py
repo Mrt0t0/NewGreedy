@@ -164,6 +164,7 @@ class NewGreedyAddon:
 
     def _load_stats(self):
         VALID = re.compile(r"^[0-9a-f]{6,40}$")
+        logger.info("Loading stats from: %s", self._stats_file)
         try:
             with open(self._stats_file) as f:
                 raw = json.load(f)
@@ -233,9 +234,11 @@ class NewGreedyAddon:
 
         domain = _tracker_domain(url)
 
-        # Extraction robuste du info_hash depuis les bytes bruts
-        raw_query = flow.request.query_string  # bytes bruts, non décodés
-        ih_hex = _extract_infohash(raw_query)
+        # Extraction info_hash depuis les bytes bruts (flow.request.data.path)
+        raw_path  = flow.request.data.path           # b"/announce?info_hash=%21%3C..."
+        q_start   = raw_path.find(b"?")
+        raw_query = raw_path[q_start+1:] if q_start != -1 else b""
+        ih_hex    = _extract_infohash(raw_query)
         if not ih_hex or len(ih_hex) < 6:
             logger.debug("Skipping: no valid info_hash in %s", url[:80])
             return
