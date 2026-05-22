@@ -36,32 +36,32 @@ reported values before they reach the tracker.
 
 | # | Bug | Status |
 |---|---|---|
-| BF-1 | `uploaded` field sent as delta instead of cumulative session total | **Fixed** |
-| BF-2 | Stagnation with `real_ul=0` sent `uploaded=0`, causing ratio regression on tracker | **Fixed** |
-| BF-3 | Stagnation could produce a cumulative value lower than the previous announce | **Fixed** |
-| BF-4 | Session restart sent incorrect `uploaded` value relative to previous session | **Fixed** |
-| BF-5 | `stall_announce_threshold` default was 10 — stall detection was too slow | **Fixed (now 8)** |
+| 1 | `uploaded` field sent as delta instead of cumulative session total | **Fixed** |
+| 2 | Stagnation with `real_ul=0` sent `uploaded=0`, causing ratio regression on tracker | **Fixed** |
+| 3 | Stagnation could produce a cumulative value lower than the previous announce | **Fixed** |
+| 4 | Session restart sent incorrect `uploaded` value relative to previous session | **Fixed** |
+| 5 | `stall_announce_threshold` default was 10 — stall detection was too slow | **Fixed (now 8)** |
 
-### Behavior Changes
+### Changes
 
 | # | Change | v1.4 | v1.5.1 |
 |---|---|---|---|
-| BC-1 | Stagnation during `Ann#1–N` | always possible | blocked for first N announces (`min_announces_before_stagnation`) |
-| BC-2 | Stagnation probability | flat 15% | context-aware: lower when far from target, higher near plateau |
-| BC-3 | `catch_up_factor` default | 0.15 | **0.22** — faster catch-up for high-target ratios |
-| BC-4 | `stagnation_probability` default | 0.15 | **0.08** — reduced risk of ratio regression |
-| BC-5 | Cumulative upload guard | none | `uploaded` never decreases within a session |
-| BC-6 | `SentUL` log field | absent | **added** — shows exact value sent to tracker |
+| 1 | Stagnation during `Ann#1–N` | always possible | blocked for first N announces (`min_announces_before_stagnation`) |
+| 2 | Stagnation probability | flat 15% | context-aware: lower when far from target, higher near plateau |
+| 3 | `catch_up_factor` default | 0.15 | **0.22** — faster catch-up for high-target ratios |
+| 4 | `stagnation_probability` default | 0.15 | **0.08** — reduced risk of ratio regression |
+| 5 | Cumulative upload guard | none | `uploaded` never decreases within a session |
+| 6 | `SentUL` log field | absent | **added** — shows exact value sent to tracker |
 
 ### New Features
 
 | # | Feature | Config key |
 |---|---|---|
-| NF-1 | Target ratio buffer — internal target slightly above configured value | `target_ratio_buffer` |
-| NF-2 | Minimum announces before stagnation may occur | `min_announces_before_stagnation` |
-| NF-3 | Smart stagnation — probability scales with ratio progress | automatic |
-| NF-4 | Health API endpoint `/api/health` — lists stalled and anomalous torrents | Web UI |
-| NF-5 | `[STALL]` flag threshold reduced from 10 to 8 announces | `stall_announce_threshold` |
+| 1 | Target ratio buffer — internal target slightly above configured value | `target_ratio_buffer` |
+| 2 | Minimum announces before stagnation may occur | `min_announces_before_stagnation` |
+| 3 | Smart stagnation — probability scales with ratio progress | automatic |
+| 4 | Health API endpoint `/api/health` — lists stalled and anomalous torrents | Web UI |
+| 5 | `[STALL]` flag threshold reduced from 10 to 8 announces | `stall_announce_threshold` |
 
 ---
 
