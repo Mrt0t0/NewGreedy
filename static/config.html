@@ -1,50 +1,44 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Config — NewGreedy</title>
-<link rel="stylesheet" href="/static/style.css">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Config — NewGreedy</title>
+  <link rel="stylesheet" href="/static/style.css">
 </head>
-<body>
-<nav class="navbar">
-  <span class="brand">🟢 NewGreedy <span class="ver">v1.5.1</span></span>
-  <div class="nav-links">
-    <a href="/">Dashboard</a><a href="/static/torrents.html">Torrents</a>
-    <a href="/static/charts.html">Charts</a>
-    <a href="/static/config.html" class="active">Config</a>
-    <a href="/static/logs.html">Logs</a>
+<body>  <nav class="navbar">
+    <div style="display:flex;align-items:center;gap:8px">
+      <span class="brand">🟢 NewGreedy</span>
+      <span class="ver">v1.6.0</span>
+    </div>
+    <div class="nav-links">
+      <a href="/">Dashboard</a>
+      <a href="/torrents">Torrents</a>
+      <a href="/charts">Charts</a>
+      <a href="/config">Config</a>
+      <a href="/logs">Logs</a>
+      <a href="/help">Help</a>
+    </div>
+  </nav>
+  <div class="container">
+    <h1>Configuration</h1>
+    <p class="muted" style="margin-bottom:20px">Read-only view of <code>config.ini</code> — edit the file directly and restart to apply changes.</p>
+    <div id="cfg-body"></div>
   </div>
-</nav>
-<main class="container">
-  <h1>Configuration</h1>
-  <div id="cfg"></div>
-  <div class="cfg-actions">
-    <button onclick="reloadCfg()" class="btn">🔄 Reload config</button>
-    <span id="msg"></span>
-  </div>
-</main>
 <script>
 async function load(){
-  const cfg = await fetch("/api/config").then(r=>r.json()).catch(()=>({}));
-  let html="";
-  for(const [sec, vals] of Object.entries(cfg)){
-    html+=`<div class="cfg-section"><h3>[${sec}]</h3><table>`;
-    for(const [k,v] of Object.entries(vals)){
-      html+=`<tr><td class="mono cfg-key">${k}</td><td class="cfg-val">${v||"<span class=muted>(empty)</span>"}</td></tr>`;
-    }
-    html+="</table></div>";
-  }
-  document.getElementById("cfg").innerHTML=html||"<p class=muted>No config loaded.</p>";
-}
-async function reloadCfg(){
-  await fetch("/api/config/reload",{method:"POST"}).catch(()=>{});
-  const m=document.getElementById("msg");
-  m.textContent=" ✅ Reloaded";
-  setTimeout(()=>m.textContent="",3000);
-  load();
+  const cfg=await fetch('/api/config').then(r=>r.json());
+  const el=document.getElementById('cfg-body');
+  Object.entries(cfg).forEach(([sec,keys])=>{
+    el.innerHTML+=`<div class="cfg-section"><h3>[${sec}]</h3><table>
+      ${Object.entries(keys).map(([k,v])=>`<tr>
+        <td class="cfg-key mono">${k}</td>
+        <td class="cfg-val">${v}</td>
+      </tr>`).join('')}</table></div>`;
+  });
 }
 load();
 </script>
+
 </body>
 </html>

@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Help — NewGreedy</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>  <nav class="navbar">
+    <div style="display:flex;align-items:center;gap:8px">
+      <span class="brand">🟢 NewGreedy</span>
+      <span class="ver">v1.6.0</span>
+    </div>
+    <div class="nav-links">
+      <a href="/">Dashboard</a>
+      <a href="/torrents">Torrents</a>
+      <a href="/charts">Charts</a>
+      <a href="/config">Config</a>
+      <a href="/logs">Logs</a>
+      <a href="/help">Help</a>
+    </div>
+  </nav>
+  <div class="container help-content">
+    <h1>Help & Documentation</h1>
+    <div class="help-toc">
+      <a href="#overview">Overview</a>
+      <a href="#architecture">Architecture</a>
+      <a href="#setup">Setup</a>
+      <a href="#config">Configuration</a>
+      <a href="#webui">Web UI</a>
+      <a href="#lifecycle">Torrent Lifecycle</a>
+      <a href="#trackers">Tracker Management</a>
+      <a href="#antidetect">Anti-Detection</a>
+      <a href="#faq">FAQ</a>
+    </div>
+
+    <h2 id="overview">Overview</h2>
+    <p>NewGreedy is a transparent mitmproxy-based addon that intercepts BitTorrent tracker announces and injects simulated upload statistics. It targets a configurable ratio (default 1.60) using a smart catch-up algorithm with exponential decay, stagnation simulation, and DUL smoothing.</p>
+    <p>Version 1.6 adds full lifecycle management, dead tracker detection, anti-detection hardening, and a redesigned Web UI with real-time health monitoring.</p>
+
+    <h2 id="architecture">Architecture</h2>
+    <ul>
+      <li><code>newgreedy.py</code> — Entry point. Launches mitmproxy + optional Web UI thread.</li>
+      <li><code>newgreedy_addon.py</code> — Core mitmproxy addon. Intercepts all <code>/announce</code> requests and patches the <code>uploaded</code> field.</li>
+      <li><code>newgreedy_web.py</code> — FastAPI server exposing the Web UI and REST/WebSocket API.</li>
+      <li><code>config.ini</code> — All tunable parameters.</li>
+      <li><code>stats.json</code> — Persisted per-torrent state (auto-saved every 5 min).</li>
+    </ul>
+
+    <h2 id="setup">Setup</h2>
+    <pre>pip install -r requirements.txt
+mitm-install-ca  # install mitmproxy CA certificate
+python newgreedy.py</pre>
+    <p>Configure your BitTorrent client (qBittorrent, Transmission…) to use HTTP proxy <code>127.0.0.1:3456</code>. The Web UI is available at <code>http://localhost:8080</code>.</p>
+    <p><b>Docker:</b> <code>docker compose up -d</code> — proxy on port 3456, Web UI on 8080.</p>
+
+    <h2 id="config">Configuration Reference</h2>
+    <h3>[proxy]</h3>
+    <ul>
+      <li><code>listen_port</code> — mitmproxy listen port (default: 3456)</li>
+      <li><code>tracker_timeout</code> — seconds before giving up on tracker connection</li>
+    </ul>
+    <h3>[spoofing]</h3>
+    <ul>
+      <li><code>target_ratio</code> — ratio target to reach (default: 1.60)</li>
+      <li><code>target_ratio_buffer</code> — safety margin added to target (default: 0.03)</li>
+      <li><code>catch_up_factor</code> — aggressiveness of upload catch-up (0.1–0.5)</li>
+      <li><code>max_simulated_speed_mbps</code> — cap on injected upload speed</li>
+      <li><code>stagnation_probability</code> — probability of simulating a stagnation event</li>
+      <li><code>upload_noise_pct</code> — random noise % added to uploads for naturalness</li>
+    </ul>
+    <h3>[anti_detection]</h3>
+    <ul>
+      <li><code>spoof_peer_id</code> — generate a realistic peer_id per torrent (persisted)</li>
+      <li><code>spoof_user_agent</code> — match User-Agent to the spoofed client</li>
+      <li><code>dul_smooth_alpha</code> — smoothing factor for +DUL distribution (0=very smooth, 1=instant)</li>
+      <li><code>tracker_blacklist</code> — comma-separated domains to never inject</li>
+    </ul>
+    <h3>[advanced]</h3>
+    <ul>
+      <li><code>interval_jitter_pct</code> — ±% randomization of announce interval (default: 0.15 = ±15%)</li>
+      <li><code>startup_grace_seconds</code> — ignore announces for N seconds after start (default: 15)</li>
+      <li><code>stats_save_interval</code> — periodic save interval in seconds (default: 300)</li>
+      <li><code>dead_tracker_threshold</code> — consecutive errors before marking dead (default: 3)</li>
+      <li><code>dead_tracker_ttl_hours</code> — blacklist duration in hours (default: 12)</li>
+      <li><code>end_ttl_minutes</code> — minutes without announce before marking torrent as END (default: 60)</li>
+      <li><code>purge_ttl_minutes</code> — minutes after END before purging from stats (default: 120)</li>
+    </ul>
+
+    <h2 id="webui">Web UI Pages</h2>
+    <ul>
+      <li><b>Dashboard</b> — Global health bar, KPIs, active torrent table with badges and status tags.</li>
+      <li><b>Torrents</b> — Full torrent list including ended torrents, ratio progress bar.</li>
+      <li><b>Charts</b> — Bar charts for ratio and CumUL per torrent. Configurable data point limit.</li>
+      <li><b>Config</b> — Read-only view of the current config.ini.</li>
+      <li><b>Logs</b> — Live log stream (WebSocket) with filters by level, hash, and event type.</li>
+      <li><b>Help</b> — This page.</li>
+    </ul>
+
+    <h2 id="lifecycle">Torrent Lifecycle</h2>
+    <p>Each torrent tracked by NewGreedy goes through the following states:</p>
+    <ul>
+      <li><span class="tag dl">DL+SEED</span> — Active download with upload injection.</li>
+      <li><span class="tag seed">SEED</span> — Pure seeder (downloaded=0, left=0).</li>
+      <li><span class="tag conv">CONV</span> — Ratio converging to target.</li>
+      <li><span class="tag conv">CONV_DONE</span> — Ratio stabilized at target, minimal injection.</li>
+      <li><span class="tag end">END</span> — No announce received for <code>end_ttl_minutes</code>. Torrent likely removed.</li>
+    </ul>
+    <p>Torrents in END state are displayed dimmed in the UI and purged from <code>stats.json</code> after <code>purge_ttl_minutes</code>.</p>
+
+    <h2 id="trackers">Tracker Management</h2>
+    <p>NewGreedy monitors all tracker responses. If a tracker returns ≥ <code>dead_tracker_threshold</code> consecutive errors (HTTP 4xx/5xx or connection timeout), it is flagged as <b>DEAD</b> and blacklisted for <code>dead_tracker_ttl_hours</code> hours. During this period, no DUL is injected and no connection is attempted.</p>
+    <p>Dead trackers are shown in the Dashboard health bar and alerts section. The blacklist resets automatically after the TTL expires.</p>
+    <p>Announce timeouts (client disconnects before server responds) are logged as <code>[WARN] CONNECT_ERROR</code> with a running counter visible in the health API.</p>
+
+    <h2 id="antidetect">Anti-Detection Features</h2>
+    <ul>
+      <li><b>Announce jitter</b> — Interval randomized ±15% around the tracker-provided interval to avoid machine-regular patterns.</li>
+      <li><b>DUL smoothing</b> — Upload delta spread over multiple announces using exponential smoothing to avoid abrupt spikes.</li>
+      <li><b>Persistent peer_id</b> — Each torrent keeps its peer_id stable across restarts (stored in stats.json).</li>
+      <li><b>Monotone uploaded</b> — uploaded value never decreases between announces (immediate tracker flag).</li>
+      <li><b>User-Agent preservation</b> — UA is matched to the spoofed client identity and never overwritten with a proxy UA.</li>
+      <li><b>HTTP tracker support</b> — DUL injection applies equally to HTTP (port 80/1337) and HTTPS trackers.</li>
+    </ul>
+
+    <h2 id="faq">FAQ</h2>
+    <p><b>Q: Does NewGreedy work with UDP trackers?</b><br>
+    No — mitmproxy only intercepts HTTP/HTTPS. UDP announces pass through unmodified. Disable UDP trackers in your client for full coverage.</p>
+    <p><b>Q: Why is a tracker showing as DEAD?</b><br>
+    The tracker returned 3+ consecutive errors. Check the Logs page for details. It will auto-recover after 12 hours.</p>
+    <p><b>Q: Stats were lost after a restart.</b><br>
+    Ensure <code>persist_stats = true</code> in config.ini and that <code>stats.json</code> is writable. The periodic save runs every 5 minutes — a hard kill within that window may lose the last few announces.</p>
+    <p><b>Q: A torrent disappeared from the dashboard.</b><br>
+    It was purged after being in END state for <code>purge_ttl_minutes</code>. Increase <code>purge_ttl_minutes</code> to retain entries longer.</p>
+  </div>
+
+</body>
+</html>

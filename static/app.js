@@ -1,1 +1,1 @@
-console.log("NewGreedy v1.5.1");
+// NewGreedy v1.6 — static/app.js

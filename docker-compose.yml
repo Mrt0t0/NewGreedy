@@ -1,4 +1,4 @@
-version: "3.8"
+version: "3.9"
 services:
   newgreedy:
     build: .
@@ -6,6 +6,6 @@ services:
       - "3456:3456"
       - "8080:8080"
     volumes:
-      - ./config.ini:/app/config.ini
       - ./stats.json:/app/stats.json
+      - ./newgreedy.log:/app/newgreedy.log
     restart: unless-stopped

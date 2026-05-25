@@ -16,7 +16,8 @@ def _sighup(signum, frame):
     cfg.read("config.ini")
     logger.info("Config reloaded (SIGHUP)")
 
-signal.signal(signal.SIGHUP, _sighup)
+try: signal.signal(signal.SIGHUP, _sighup)
+except AttributeError: pass
 
 def _start_web():
     try:
@@ -30,12 +31,11 @@ def _start_web():
         logger.warning("Web UI not started: %s", e)
 
 def main():
-    logger.info("NewGreedy v1.5.1 starting...")
+    logger.info("NewGreedy v1.6.0 starting...")
     listen_port = cfg.getint("proxy", "listen_port", fallback=3456)
-    logger.info("Launching mitmproxy on 0.0.0.0:%d  (HTTP + HTTPS)", listen_port)
+    logger.info("Launching mitmproxy on 0.0.0.0:%d (HTTP + HTTPS)", listen_port)
 
-    web_enabled = cfg.getboolean("web", "web_enabled", fallback=True)
-    if web_enabled:
+    if cfg.getboolean("web", "web_enabled", fallback=True):
         t = threading.Thread(target=_start_web, daemon=True)
         t.start()
 

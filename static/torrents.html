@@ -1,73 +1,74 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Torrents — NewGreedy</title>
-<link rel="stylesheet" href="/static/style.css">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Torrents — NewGreedy</title>
+  <link rel="stylesheet" href="/static/style.css">
 </head>
-<body>
-<nav class="navbar">
-  <span class="brand">🟢 NewGreedy <span class="ver">v1.5.1</span></span>
-  <div class="nav-links">
-    <a href="/">Dashboard</a>
-    <a href="/static/torrents.html" class="active">Torrents</a>
-    <a href="/static/charts.html">Charts</a>
-    <a href="/static/config.html">Config</a>
-    <a href="/static/logs.html">Logs</a>
+<body>  <nav class="navbar">
+    <div style="display:flex;align-items:center;gap:8px">
+      <span class="brand">🟢 NewGreedy</span>
+      <span class="ver">v1.6.0</span>
+    </div>
+    <div class="nav-links">
+      <a href="/">Dashboard</a>
+      <a href="/torrents">Torrents</a>
+      <a href="/charts">Charts</a>
+      <a href="/config">Config</a>
+      <a href="/logs">Logs</a>
+      <a href="/help">Help</a>
+    </div>
+  </nav>
+  <div class="container">
+    <h1>Torrents</h1>
+    <table>
+      <thead><tr>
+        <th>Hash</th><th>Mode</th><th>CumDL</th><th>RealUL</th>
+        <th>CumUL (SentUL)</th><th>Ratio</th><th>Target</th>
+        <th>Progress</th><th>Ann#</th><th>Status</th>
+      </tr></thead>
+      <tbody id="tbody"></tbody>
+    </table>
   </div>
-</nav>
-<main class="container">
-  <h1>Torrents <span id="count" class="badge"></span></h1>
-  <table>
-    <thead><tr>
-      <th>Hash</th><th>CumDL</th><th>RealUL</th><th>CumUL (SentUL)</th><th>Ratio</th><th>Target</th><th>Progress</th><th>Ann#</th><th>Status</th>
-    </tr></thead>
-    <tbody id="tbody"></tbody>
-  </table>
-</main>
 <script>
-function fmt(b){ return b && b>0 ? (b/1e6).toFixed(1)+" MB" : "0 MB"; }
-const TARGET = 1.63;
-
-async function load(){
-  let stats={}, health={stalled:[],anomalies:[]};
-  try { stats  = await fetch("/api/stats").then(r=>r.json()); } catch(e){}
-  try { health = await fetch("/api/health").then(r=>r.json()); } catch(e){}
-
-  const entries = Object.entries(stats);
-  document.getElementById("count").textContent = entries.length;
-  const tbody = document.getElementById("tbody");
-  tbody.innerHTML = "";
-
-  for(const [ih, d] of entries){
-    const ratio   = d.cumul_rep_dl>0 ? d.cumul_rep_ul/d.cumul_rep_dl : null;
-    const ratioStr= ratio!==null ? ratio.toFixed(3) : "—";
-    const pct     = ratio!==null ? Math.min(100, ratio/TARGET*100).toFixed(0) : 0;
-    const stalled = (health.stalled||[]).includes(ih);
-    const anomaly = (health.anomalies||[]).includes(ih);
-    const status  = stalled
-      ? "<span class=\'tag stall\'>STALL</span>"
-      : anomaly
-        ? "<span class=\'tag warn\'>ANOMALY</span>"
-        : "<span class=\'tag ok\'>OK</span>";
-    tbody.innerHTML += `<tr>
-      <td class="mono">${ih}</td>
-      <td>${fmt(d.cumul_rep_dl)}</td>
-      <td>${fmt(d.cumul_real_ul)}</td>
-      <td>${fmt(d.cumul_rep_ul)}</td>
-      <td><span style="font-weight:600">${ratioStr}</span></td>
-      <td>${TARGET}</td>
-      <td>
-        <div class="bar-bg"><div class="bar-fill" style="width:${pct}%"></div></div>
-        <span class="bar-pct">${pct}%</span>
-      </td>
-      <td>${d.ann_count||0}</td>
-      <td>${status}</td>
-    </tr>`;
-  }
+function mode(d){
+  if(d.ended)             return '<span class="tag end">END</span>';
+  if(d.conv_done)         return '<span class="tag conv">CONV</span>';
+  if(!d.cumul_rep_dl)     return '<span class="tag seed">SEED</span>';
+  return '<span class="tag dl">DL+SEED</span>';
 }
-load(); setInterval(load,15000);
+function status(d){
+  const t=[];
+  if(d.is_stalled_net)  t.push('<span class="tag stall">STALL_NET</span>');
+  if(d.is_stalled_algo) t.push('<span class="tag err">STALL_ALGO</span>');
+  if((d.stag_count||0)>=3) t.push('<span class="tag warn">STAG</span>');
+  if(d.conv_done)       t.push('<span class="tag conv">CONV_DONE</span>');
+  if(d.cumul_real_ul>0) t.push('<span class="tag active-ul">ACTIVE UL</span>');
+  return t.join(' ')||'<span class="tag ok">OK</span>';
+}
+async function refresh(){
+  const s=await fetch('/api/stats').then(r=>r.json());
+  const tb=document.getElementById('tbody'); tb.innerHTML='';
+  Object.entries(s).sort((a,b)=>(b[1].ann_count||0)-(a[1].ann_count||0)).forEach(([ih,d])=>{
+    const ul=d.cumul_rep_ul||0,dl=d.cumul_rep_dl||0,ratio=dl>0?ul/dl:0;
+    const target=d.target_ratio||1.6,pct=Math.min(100,(ratio/target)*100);
+    const tr=document.createElement('tr');
+    if(d.ended) tr.className='ended';
+    tr.innerHTML=`<td class="mono">${ih.slice(0,8)}</td><td>${mode(d)}</td>
+      <td>${(dl/1e6).toFixed(0)} MB</td>
+      <td>${((d.cumul_real_ul||0)/1e6).toFixed(1)} MB</td>
+      <td>${(ul/1e6).toFixed(0)} MB</td>
+      <td>${ratio.toFixed(3)}</td>
+      <td class="muted">${target.toFixed(2)}</td>
+      <td><span class="bar-bg"><span class="bar-fill" style="width:${pct}%"></span></span><span class="bar-pct">${pct.toFixed(0)}%</span></td>
+      <td>${d.ann_count||0}</td>
+      <td>${status(d)}</td>`;
+    tb.appendChild(tr);
+  });
+}
+refresh(); setInterval(refresh,10000);
 </script>
+
 </body>
 </html>

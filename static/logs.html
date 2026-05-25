@@ -1,101 +1,83 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Logs — NewGreedy</title>
-<link rel="stylesheet" href="/static/style.css">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Logs — NewGreedy</title>
+  <link rel="stylesheet" href="/static/style.css">
 </head>
-<body>
-<nav class="navbar">
-  <span class="brand">🟢 NewGreedy <span class="ver">v1.5.1</span></span>
-  <div class="nav-links">
-    <a href="/">Dashboard</a><a href="/static/torrents.html">Torrents</a>
-    <a href="/static/charts.html">Charts</a><a href="/static/config.html">Config</a>
-    <a href="/static/logs.html" class="active">Logs</a>
+<body>  <nav class="navbar">
+    <div style="display:flex;align-items:center;gap:8px">
+      <span class="brand">🟢 NewGreedy</span>
+      <span class="ver">v1.6.0</span>
+    </div>
+    <div class="nav-links">
+      <a href="/">Dashboard</a>
+      <a href="/torrents">Torrents</a>
+      <a href="/charts">Charts</a>
+      <a href="/config">Config</a>
+      <a href="/logs">Logs</a>
+      <a href="/help">Help</a>
+    </div>
+  </nav>
+  <div class="container">
+    <h1>Logs <span class="ws-badge" id="ws-status">Connecting...</span></h1>
+    <div class="log-toolbar">
+      <label class="log-opt"><input type="checkbox" id="f-seed" checked> SEEDING</label>
+      <label class="log-opt"><input type="checkbox" id="f-dl"   checked> DOWNLOADING</label>
+      <label class="log-opt"><input type="checkbox" id="f-stag" checked> STAG</label>
+      <label class="log-opt"><input type="checkbox" id="f-stall"checked> STALL</label>
+      <label class="log-opt"><input type="checkbox" id="f-err"  checked> ERRORS</label>
+      <label class="log-opt"><input type="checkbox" id="f-dead" checked> DEAD_TRACKER</label>
+      <label class="log-opt"><input type="checkbox" id="f-conv" checked> CONV_DONE</label>
+      <input id="f-hash" placeholder="Filter by hash…" style="background:var(--surface);color:var(--text);border:1px solid var(--border);padding:4px 10px;border-radius:4px;font-size:12px;width:160px">
+      <button class="btn-outline" onclick="document.getElementById('log-box').innerHTML=''">Clear</button>
+    </div>
+    <div id="log-box"></div>
   </div>
-</nav>
-<main class="container">
-  <h1>Live Logs</h1>
-  <div class="log-toolbar">
-    <div id="health-summary" class="muted"></div>
-    <label class="log-opt"><input type="checkbox" id="autoScroll" checked> Auto-scroll</label>
-    <label class="log-opt"><input type="checkbox" id="hideDebug" checked> Hide DEBUG</label>
-    <label class="log-opt"><input type="checkbox" id="filterStag"> STAG/STALL only</label>
-    <button class="btn btn-sm" onclick="clearLog()">Clear</button>
-  </div>
-  <div id="log-box"></div>
-  <div id="ws-status" class="ws-badge">⏳ Connecting…</div>
-</main>
 <script>
-const box = document.getElementById("log-box");
-const wsStatus = document.getElementById("ws-status");
-let lines = [];
-
-function shouldShow(l){
-  if(document.getElementById("filterStag").checked)
-    return l.includes("[STAG]") || l.includes("[STALL]");
-  if(document.getElementById("hideDebug").checked)
-    if(l.includes("[DEBUG]") || l.includes(" DEBUG ")) return false;
+const box=document.getElementById('log-box');
+const MAX=500;
+function classify(l){
+  if(l.includes('DEAD_TRACKER'))   return 'log-dead';
+  if(l.includes('STALL_ALGO'))     return 'log-stall';
+  if(l.includes('STALL_NET'))      return 'log-stall';
+  if(l.includes('STAG_PROLONGED')) return 'log-stag';
+  if(l.includes('[STAG]'))         return 'log-stag';
+  if(l.includes('CONV_DONE'))      return 'log-conv';
+  if(l.includes('SEEDING'))        return 'log-seed';
+  if(l.includes('DOWNLOADING'))    return 'log-dl';
+  if(l.includes('ERROR')||l.includes('error')) return 'log-err';
+  return '';
+}
+function visible(l){
+  const h=document.getElementById('f-hash').value.trim().toLowerCase();
+  if(h && !l.toLowerCase().includes(h)) return false;
+  if(l.includes('SEEDING')    && !document.getElementById('f-seed').checked)  return false;
+  if(l.includes('DOWNLOADING')&& !document.getElementById('f-dl').checked)    return false;
+  if((l.includes('STAG'))     && !document.getElementById('f-stag').checked)  return false;
+  if((l.includes('STALL'))    && !document.getElementById('f-stall').checked) return false;
+  if((l.includes('ERROR')||l.includes('error'))&&!document.getElementById('f-err').checked) return false;
+  if(l.includes('DEAD_TRACKER')&&!document.getElementById('f-dead').checked)  return false;
+  if(l.includes('CONV_DONE')  && !document.getElementById('f-conv').checked)  return false;
   return true;
 }
-
-function colorLine(l){
-  if(l.includes("[STALL]")) return "log-stall";
-  if(l.includes("[STAG]"))  return "log-stag";
-  if(l.includes("ERROR"))   return "log-err";
-  if(l.includes("SEEDING")) return "log-seed";
-  if(l.includes("DOWNLOADING")) return "log-dl";
-  return "";
+function append(line){
+  if(!visible(line)) return;
+  const d=document.createElement('div');
+  d.className='log-line '+classify(line);
+  d.textContent=line;
+  box.appendChild(d);
+  while(box.children.length>MAX) box.removeChild(box.firstChild);
+  box.scrollTop=box.scrollHeight;
 }
-
-function addLine(l){ lines.push(l); if(lines.length>500) lines.shift(); render(); }
-function clearLog(){ lines=[]; box.innerHTML=""; }
-
-function render(){
-  box.innerHTML = lines
-    .filter(shouldShow)
-    .map(l=>`<div class="log-line ${colorLine(l)}">${escHtml(l)}</div>`)
-    .join("");
-  if(document.getElementById("autoScroll").checked) box.scrollTop = box.scrollHeight;
-}
-
-function escHtml(s){ return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
-
-["filterStag","hideDebug"].forEach(id=>
-  document.getElementById(id).addEventListener("change", render)
-);
-
-async function loadHealth(){
-  try{
-    const h = await fetch("/api/health").then(r=>r.json());
-    document.getElementById("health-summary").textContent =
-      `Tracked: ${h.total}  |  Stalled: ${(h.stalled||[]).length}  |  Anomalies: ${(h.anomalies||[]).length}`;
-  }catch(e){}
-}
-
-async function loadInitialLogs(){
-  try{
-    const data = await fetch("/api/logs?lines=100").then(r=>r.json());
-    (data.lines||[]).forEach(l=>addLine(l.trim()));
-  }catch(e){}
-}
-
-function connectWS(){
-  const proto = location.protocol==="https:"?"wss":"ws";
-  const ws = new WebSocket(`${proto}://${location.host}/ws/logs`);
-  ws.onopen = ()=>{ wsStatus.textContent="🟢 Live"; wsStatus.className="ws-badge ws-ok"; };
-  ws.onmessage = e => addLine(e.data);
-  ws.onclose = ()=>{
-    wsStatus.textContent="🔴 Disconnected — retry in 5s";
-    wsStatus.className="ws-badge ws-err";
-    setTimeout(connectWS,5000);
-  };
-  ws.onerror = ()=> ws.close();
-}
-
-loadHealth(); loadInitialLogs(); connectWS();
-setInterval(loadHealth,10000);
+const ws=new WebSocket(`ws://${location.host}/ws/logs`);
+const badge=document.getElementById('ws-status');
+ws.onopen=()=>{ badge.className='ws-badge ws-ok'; badge.textContent='Live'; };
+ws.onmessage=e=>append(e.data);
+ws.onerror=ws.onclose=()=>{ badge.className='ws-badge ws-err'; badge.textContent='Disconnected'; };
+fetch('/api/logs?n=200').then(r=>r.json()).then(d=>d.lines.forEach(append));
 </script>
+
 </body>
 </html>

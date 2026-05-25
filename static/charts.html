@@ -1,55 +1,73 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Charts — NewGreedy</title>
-<link rel="stylesheet" href="/static/style.css">
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Charts — NewGreedy</title>
+  <link rel="stylesheet" href="/static/style.css">
 </head>
-<body>
-<nav class="navbar">
-  <span class="brand">🟢 NewGreedy <span class="ver">v1.5.1</span></span>
-  <div class="nav-links">
-    <a href="/">Dashboard</a><a href="/static/torrents.html">Torrents</a>
-    <a href="/static/charts.html" class="active">Charts</a>
-    <a href="/static/config.html">Config</a><a href="/static/logs.html">Logs</a>
+<body>  <nav class="navbar">
+    <div style="display:flex;align-items:center;gap:8px">
+      <span class="brand">🟢 NewGreedy</span>
+      <span class="ver">v1.6.0</span>
+    </div>
+    <div class="nav-links">
+      <a href="/">Dashboard</a>
+      <a href="/torrents">Torrents</a>
+      <a href="/charts">Charts</a>
+      <a href="/config">Config</a>
+      <a href="/logs">Logs</a>
+      <a href="/help">Help</a>
+    </div>
+  </nav>
+  <div class="container">
+    <h1>Charts</h1>
+    <div class="chart-controls">
+      <label for="limit-sel" style="color:var(--muted)">Data points:</label>
+      <select id="limit-sel" style="background:var(--surface);color:var(--text);border:1px solid var(--border);padding:4px 8px;border-radius:4px">
+        <option value="100">100</option><option value="500" selected>500</option>
+        <option value="1000">1000</option>
+      </select>
+      <button class="btn-outline" onclick="renderCharts()">Refresh</button>
+    </div>
+    <div class="chart-grid">
+      <div class="chart-card">
+        <h3>Ratio per torrent</h3>
+        <canvas id="chartRatio" height="200"></canvas>
+      </div>
+      <div class="chart-card">
+        <h3>CumUL per torrent (MB)</h3>
+        <canvas id="chartUL" height="200"></canvas>
+      </div>
+    </div>
   </div>
-</nav>
-<main class="container">
-  <h1>Charts</h1>
-  <div class="chart-grid">
-    <div class="chart-card"><h3>Ratio per torrent</h3><canvas id="ratioChart"></canvas></div>
-    <div class="chart-card"><h3>CumUL per torrent (MB)</h3><canvas id="ulChart"></canvas></div>
-  </div>
-</main>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 <script>
-let ratioChart, ulChart;
-async function load(){
-  const stats = await fetch("/api/stats").then(r=>r.json()).catch(()=>({}));
-  const entries = Object.entries(stats);
-  const labels  = entries.map(([ih])=>ih);
-  const ratios  = entries.map(([,d])=> d.cumul_rep_dl>0 ? +(d.cumul_rep_ul/d.cumul_rep_dl).toFixed(3) : 0);
-  const uls     = entries.map(([,d])=> +((d.cumul_rep_ul||0)/1e6).toFixed(1));
-  const colors  = ratios.map(r=> r>=1.5?"rgba(109,170,69,.8)": r>=0.8?"rgba(232,175,52,.8)":"rgba(221,105,116,.8)");
-
-  const opts = {responsive:true, plugins:{legend:{display:false}}};
-
-  if(ratioChart) ratioChart.destroy();
-  ratioChart = new Chart(document.getElementById("ratioChart"),{
-    type:"bar",
-    data:{labels, datasets:[{label:"Ratio",data:ratios,backgroundColor:colors}]},
-    options:{...opts, scales:{y:{beginAtZero:true, max:Math.max(2, ...ratios)+0.2}}}
+const COLORS=['#4f98a3','#6daa45','#e8af34','#dd6974','#9b6dd4','#5591c7','#bb653b','#4f98a3'];
+let charts={};
+async function renderCharts(){
+  const stats=await fetch('/api/stats').then(r=>r.json());
+  const labels=[],ratios=[],uls=[];
+  Object.entries(stats).filter(([,d])=>!d.ended).forEach(([ih,d])=>{
+    const dl=d.cumul_rep_dl||0,ul=d.cumul_rep_ul||0;
+    labels.push(ih.slice(0,8));
+    ratios.push(dl>0?(ul/dl).toFixed(3):0);
+    uls.push((ul/1e6).toFixed(0));
   });
-
-  if(ulChart) ulChart.destroy();
-  ulChart = new Chart(document.getElementById("ulChart"),{
-    type:"bar",
-    data:{labels, datasets:[{label:"CumUL MB",data:uls,backgroundColor:"rgba(79,152,163,.7)"}]},
-    options:{...opts}
-  });
+  const cfg=(id,label,data,type='bar')=>{
+    const ctx=document.getElementById(id);
+    if(charts[id]) charts[id].destroy();
+    charts[id]=new Chart(ctx,{type,data:{labels,datasets:[{label,data,
+      backgroundColor:labels.map((_,i)=>COLORS[i%COLORS.length]+'99'),
+      borderColor:labels.map((_,i)=>COLORS[i%COLORS.length]),borderWidth:1}]},
+      options:{responsive:true,plugins:{legend:{display:false}},
+        scales:{x:{ticks:{color:'#888'}},y:{ticks:{color:'#888'},grid:{color:'#2a2a2a'}}}}});
+  };
+  cfg('chartRatio','Ratio',ratios);
+  cfg('chartUL','CumUL (MB)',uls);
 }
-load(); setInterval(load, 30000);
+renderCharts();
 </script>
+
 </body>
 </html>
