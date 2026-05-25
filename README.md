@@ -1,5 +1,6 @@
 <div align="center">
 
+# NewGreedy
 
 ### BitTorrent announce proxy — Upload ratio spoofer
 
