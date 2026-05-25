@@ -8,7 +8,7 @@
 </head>
 <body>  <nav class="navbar">
     <div style="display:flex;align-items:center;gap:8px">
-      <span class="brand">🟢 NewGreedy</span>
+      <span class="brand">NewGreedy</span>
       <span class="ver">v1.6.0</span>
     </div>
     <div class="nav-links">
@@ -22,52 +22,102 @@
   </nav>
   <div class="container">
     <h1>Torrents</h1>
+
+    <div style="display:flex;gap:12px;margin-bottom:16px;align-items:center;font-size:13px">
+      <label style="color:var(--muted)">Show:</label>
+      <label class="log-opt"><input type="radio" name="filter" value="recent" checked onchange="setFilter(this.value)"> Active (recent)</label>
+      <label class="log-opt"><input type="radio" name="filter" value="all"    onchange="setFilter(this.value)"> All (including old)</label>
+      <span class="badge" id="count-badge"></span>
+    </div>
+
     <table>
       <thead><tr>
         <th>Hash</th><th>Mode</th><th>CumDL</th><th>RealUL</th>
-        <th>CumUL (SentUL)</th><th>Ratio</th><th>Target</th>
-        <th>Progress</th><th>Ann#</th><th>Status</th>
+        <th>CumUL</th><th>Ratio</th><th>Target</th><th>Progress</th><th>Ann#</th><th>Last Ann</th><th>Status</th>
       </tr></thead>
       <tbody id="tbody"></tbody>
     </table>
   </div>
+
 <script>
-function mode(d){
-  if(d.ended)             return '<span class="tag end">END</span>';
-  if(d.conv_done)         return '<span class="tag conv">CONV</span>';
-  if(!d.cumul_rep_dl)     return '<span class="tag seed">SEED</span>';
+const ACTIVE_TTL = 3 * 3600;
+const now_ts = () => Date.now() / 1000;
+let _filter = 'recent';
+
+function setFilter(v) { _filter = v; render(_lastStats); }
+
+function isRecent(d) {
+  const ts = d.last_ann_ts || 0;
+  return ts > 0 && (now_ts() - ts) < ACTIVE_TTL;
+}
+function mode(d) {
+  if (d.ended)         return '<span class="tag end">END</span>';
+  if (d.conv_done)     return '<span class="tag conv">CONV</span>';
+  if (!d.cumul_rep_dl) return '<span class="tag seed">SEED</span>';
   return '<span class="tag dl">DL+SEED</span>';
 }
-function status(d){
-  const t=[];
-  if(d.is_stalled_net)  t.push('<span class="tag stall">STALL_NET</span>');
-  if(d.is_stalled_algo) t.push('<span class="tag err">STALL_ALGO</span>');
-  if((d.stag_count||0)>=3) t.push('<span class="tag warn">STAG</span>');
-  if(d.conv_done)       t.push('<span class="tag conv">CONV_DONE</span>');
-  if(d.cumul_real_ul>0) t.push('<span class="tag active-ul">ACTIVE UL</span>');
-  return t.join(' ')||'<span class="tag ok">OK</span>';
+function status(d) {
+  const t = [];
+  if (d.is_stalled_net)         t.push('<span class="tag stall">STALL_NET</span>');
+  if (d.is_stalled_algo)        t.push('<span class="tag err">STALL_ALGO</span>');
+  if ((d.stag_count||0) >= 3)   t.push('<span class="tag warn">STAG</span>');
+  if (d.conv_done)              t.push('<span class="tag conv">CONV</span>');
+  if ((d.cumul_real_ul||0) > 0) t.push('<span class="tag active-ul">ACTIVE UL</span>');
+  return t.join(' ') || '<span class="tag ok">OK</span>';
 }
-async function refresh(){
-  const s=await fetch('/api/stats').then(r=>r.json());
-  const tb=document.getElementById('tbody'); tb.innerHTML='';
-  Object.entries(s).sort((a,b)=>(b[1].ann_count||0)-(a[1].ann_count||0)).forEach(([ih,d])=>{
-    const ul=d.cumul_rep_ul||0,dl=d.cumul_rep_dl||0,ratio=dl>0?ul/dl:0;
-    const target=d.target_ratio||1.6,pct=Math.min(100,(ratio/target)*100);
-    const tr=document.createElement('tr');
-    if(d.ended) tr.className='ended';
-    tr.innerHTML=`<td class="mono">${ih.slice(0,8)}</td><td>${mode(d)}</td>
+function fmtAge(ts) {
+  if (!ts) return '—';
+  const d = Math.floor((now_ts() - ts) / 60);
+  if (d < 60)   return d + 'm ago';
+  if (d < 1440) return Math.floor(d/60) + 'h ago';
+  return Math.floor(d/1440) + 'd ago';
+}
+
+let _lastStats = {};
+function render(s) {
+  _lastStats = s;
+  let entries = Object.entries(s);
+  if (_filter === 'recent') entries = entries.filter(([,d]) => isRecent(d) && !d.ended);
+  entries.sort((a,b) => (b[1].cumul_rep_ul||0) - (a[1].cumul_rep_ul||0));
+
+  document.getElementById('count-badge').textContent =
+    entries.length + ' shown / ' + Object.keys(s).length + ' total';
+
+  const tb = document.getElementById('tbody');
+  tb.innerHTML = '';
+  entries.forEach(([ih, d]) => {
+    const ul    = d.cumul_rep_ul || 0;
+    const dl    = d.cumul_rep_dl || 0;
+    const ratio = dl > 0 ? ul / dl : 0;
+    const target= d.target_ratio || 1.6;
+    const pct   = Math.min(100, (ratio / target) * 100).toFixed(1);
+    const tr    = document.createElement('tr');
+    if (d.ended) tr.className = 'ended';
+    tr.innerHTML = `
+      <td class="mono">${ih.slice(0,8)}</td>
+      <td>${mode(d)}</td>
       <td>${(dl/1e6).toFixed(0)} MB</td>
       <td>${((d.cumul_real_ul||0)/1e6).toFixed(1)} MB</td>
       <td>${(ul/1e6).toFixed(0)} MB</td>
       <td>${ratio.toFixed(3)}</td>
       <td class="muted">${target.toFixed(2)}</td>
-      <td><span class="bar-bg"><span class="bar-fill" style="width:${pct}%"></span></span><span class="bar-pct">${pct.toFixed(0)}%</span></td>
+      <td>
+        <span class="bar-bg"><span class="bar-fill" style="width:${pct}%"></span></span>
+        <span class="bar-pct">${pct}%</span>
+      </td>
       <td>${d.ann_count||0}</td>
+      <td class="muted">${fmtAge(d.last_ann_ts)}</td>
       <td>${status(d)}</td>`;
     tb.appendChild(tr);
   });
 }
-refresh(); setInterval(refresh,10000);
+
+async function refresh() {
+  const s = await fetch('/api/stats').then(r => r.json());
+  render(s);
+}
+refresh();
+setInterval(refresh, 10000);
 </script>
 
 </body>

@@ -1,7 +1,7 @@
 :root {
     --bg:#0f0f0f; --surface:#181818; --surface2:#222;
     --border:#2a2a2a; --text:#e0e0e0; --muted:#888;
-    --accent:#01696f; --accent-h:#4f98a3;
+    --accent:#00b4bf; --accent-h:#4fc8d4;
     --ok:#6daa45; --warn:#e8af34; --err:#dd6974; --stall:#a13544;
     --blue:#5591c7; --purple:#9b6dd4;
     --font:"Inter",system-ui,sans-serif;
@@ -67,8 +67,8 @@ tr.ended td { opacity:.45 }
 .tag.conv { background:rgba(79,152,163,.12);  color:var(--accent-h) }
 .tag.active-ul { background:rgba(109,170,69,.2); color:var(--ok); border:1px solid rgba(109,170,69,.3) }
 
-.bar-bg   { display:inline-block; width:80px; height:6px; background:var(--border); border-radius:4px; vertical-align:middle }
-.bar-fill { height:6px; background:var(--accent); border-radius:4px; transition:width .4s }
+.bar-bg   { display:inline-block; width:80px; height:8px; background:#333; border-radius:4px; vertical-align:middle; overflow:hidden }
+.bar-fill { display:block; height:8px; background:var(--accent); border-radius:4px; min-width:2px; transition:width .4s }
 .bar-pct  { font-size:11px; color:var(--muted); margin-left:6px }
 
 .alert { padding:10px 16px; border-radius:6px; margin-bottom:10px; font-size:13px }
