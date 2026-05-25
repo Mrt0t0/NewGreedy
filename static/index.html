@@ -97,10 +97,19 @@ async function refresh() {
       const ratio = dl > 0 ? ul / dl : 0;
       totUL  += ul;
       totAnn += d.ann_count || 0;
-      ratios.push(ratio);
+      if (dl > 0) ratios.push(ratio);  // exclure seeders purs du ratio moyen
 
+      // Pour seeders purs (dl=0) : progression basée sur SeedUL vs seed_credit_mb cible
+      // Pour torrents avec DL : progression ratio/target classique
       const target = d.target_ratio || 1.6;
-      const pct    = Math.min(100, (ratio / target) * 100).toFixed(1);
+      let pct;
+      if (dl === 0) {
+        // Seeder pur — on estime la progression sur 500 MB comme objectif symbolique
+        const seed_target = (d.seed_target_mb || 500) * 1e6;
+        pct = Math.min(100, (ul / seed_target) * 100).toFixed(1);
+      } else {
+        pct = Math.min(100, (ratio / target) * 100).toFixed(1);
+      }
 
       const tr = document.createElement('tr');
       tr.innerHTML = `
@@ -109,7 +118,7 @@ async function refresh() {
         <td>${(dl / 1e6).toFixed(0)} MB</td>
         <td>${((d.cumul_real_ul || 0) / 1e6).toFixed(1)} MB</td>
         <td>${(ul / 1e6).toFixed(0)} MB</td>
-        <td>${ratio.toFixed(3)}</td>
+        <td>${dl > 0 ? ratio.toFixed(3) : '<span class="muted">—</span>'}</td>
         <td>
           <span class="bar-bg"><span class="bar-fill" style="width:${pct}%"></span></span>
           <span class="bar-pct">${pct}%</span>

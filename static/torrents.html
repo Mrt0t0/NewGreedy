@@ -89,8 +89,14 @@ function render(s) {
     const ul    = d.cumul_rep_ul || 0;
     const dl    = d.cumul_rep_dl || 0;
     const ratio = dl > 0 ? ul / dl : 0;
-    const target= d.target_ratio || 1.6;
-    const pct   = Math.min(100, (ratio / target) * 100).toFixed(1);
+    const target = d.target_ratio || 1.6;
+    let pct;
+    if (dl === 0) {
+      const seed_target = (d.seed_target_mb || 500) * 1e6;
+      pct = Math.min(100, (ul / seed_target) * 100).toFixed(1);
+    } else {
+      pct = Math.min(100, (ratio / target) * 100).toFixed(1);
+    }
     const tr    = document.createElement('tr');
     if (d.ended) tr.className = 'ended';
     tr.innerHTML = `
@@ -99,7 +105,7 @@ function render(s) {
       <td>${(dl/1e6).toFixed(0)} MB</td>
       <td>${((d.cumul_real_ul||0)/1e6).toFixed(1)} MB</td>
       <td>${(ul/1e6).toFixed(0)} MB</td>
-      <td>${ratio.toFixed(3)}</td>
+      <td>${dl > 0 ? ratio.toFixed(3) : '<span class="muted">—</span>'}</td>
       <td class="muted">${target.toFixed(2)}</td>
       <td>
         <span class="bar-bg"><span class="bar-fill" style="width:${pct}%"></span></span>
