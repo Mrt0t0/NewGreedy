@@ -1,11 +1,28 @@
 version: "3.9"
+
 services:
   newgreedy:
     build: .
+    container_name: newgreedy
+    restart: unless-stopped
     ports:
       - "3456:3456"
       - "8080:8080"
     volumes:
+      - ./config.ini:/app/config.ini
       - ./stats.json:/app/stats.json
+      - ./torrent_registry.json:/app/torrent_registry.json
       - ./newgreedy.log:/app/newgreedy.log
-    restart: unless-stopped
+      - ./static:/app/static
+      - mitmproxy_ca:/root/.mitmproxy
+    environment:
+      - PYTHONUNBUFFERED=1
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  mitmproxy_ca:
