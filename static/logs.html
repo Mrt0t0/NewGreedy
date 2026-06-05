@@ -1,83 +1,330 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Logs — NewGreedy</title>
-  <link rel="stylesheet" href="/static/style.css">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NewGreedy — Logs</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0d1117;--bg2:#161b22;--bg3:#21262d;--bd:#30363d;
+  --tx:#c9d1d9;--mu:#8b949e;--ac:#58a6ff;
+  --ok:#3fb950;--wa:#d29922;--er:#f85149;--tg:#a371f7;
+  --r:6px;--mono:"SFMono-Regular",Consolas,"Liberation Mono",monospace;
+  --font:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+}
+body.light{
+  --bg:#fff;--bg2:#f6f8fa;--bg3:#eaeef2;--bd:#d0d7de;
+  --tx:#24292f;--mu:#6e7781;--ac:#0969da;
+  --ok:#1a7f37;--wa:#9a6700;--er:#cf222e;--tg:#8250df;
+}
+body{background:var(--bg);color:var(--tx);font-family:var(--font);font-size:14px;line-height:1.5;min-height:100vh}
+a{color:var(--ac);text-decoration:none}a:hover{text-decoration:underline}
+/* NAV */
+nav{background:var(--bg2);border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:4px;padding:0 20px;height:48px;position:sticky;top:0;z-index:100}
+.brand{font-weight:700;font-size:15px;color:var(--tx);white-space:nowrap;margin-right:12px}
+.nav-links{display:flex;gap:2px;flex:1}
+.nav-links a{color:var(--mu);padding:6px 10px;border-radius:var(--r);font-size:13px;transition:color .15s,background .15s}
+.nav-links a:hover,.nav-links a.active{color:var(--tx);background:var(--bg3);text-decoration:none}
+.nav-right{display:flex;align-items:center;gap:8px;margin-left:auto}
+#ubadge{background:var(--wa);color:#000;font-size:11px;font-weight:600;padding:2px 8px;border-radius:20px;cursor:pointer;white-space:nowrap;display:none}
+#ttheme{background:none;border:1px solid var(--bd);color:var(--mu);border-radius:var(--r);padding:4px 8px;cursor:pointer;font-size:13px}
+#ttheme:hover{color:var(--tx);border-color:var(--mu)}
+/* LAYOUT */
+main{padding:24px;max-width:1400px;margin:0 auto}
+h1{font-size:20px;font-weight:600;margin-bottom:20px}
+h2{font-size:15px;font-weight:600;margin-bottom:12px}
+/* CARDS */
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:24px}
+.card{background:var(--bg2);border:1px solid var(--bd);border-radius:var(--r);padding:16px}
+.clbl{font-size:11px;color:var(--mu);text-transform:uppercase;letter-spacing:.5px}
+.cval{font-size:28px;font-weight:700;margin-top:4px}
+.cval.ac{color:var(--ac)}.cval.ok{color:var(--ok)}.cval.wa{color:var(--wa)}.cval.er{color:var(--er)}.cval.tg{color:var(--tg)}
+/* TOOLBAR */
+.toolbar{display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap}
+.spacer{flex:1}
+.btn{background:var(--bg3);border:1px solid var(--bd);color:var(--tx);border-radius:var(--r);padding:5px 12px;cursor:pointer;font-size:12px;font-family:var(--font);transition:border-color .15s}
+.btn:hover{border-color:var(--mu)}
+.btn.active{border-color:var(--ac);color:var(--ac)}
+.btn.pri{background:var(--ac);border-color:var(--ac);color:#fff}.btn.pri:hover{opacity:.88}
+.btn.dan{border-color:var(--er);color:var(--er)}.btn.dan:hover{background:rgba(248,81,73,.1)}
+/* TABLE */
+.twrap{overflow-x:auto;border:1px solid var(--bd);border-radius:var(--r)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{background:var(--bg2);color:var(--mu);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;padding:10px 12px;text-align:left;border-bottom:1px solid var(--bd);white-space:nowrap}
+td{padding:9px 12px;border-bottom:1px solid var(--bd);vertical-align:middle;white-space:nowrap}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:var(--bg2)}
+.mono{font-family:var(--mono);font-size:12px}
+/* TAGS */
+.tag{display:inline-block;font-size:10px;font-weight:600;padding:2px 7px;border-radius:20px;text-transform:uppercase;letter-spacing:.3px}
+.tag.seed{background:rgba(63,185,80,.15);color:var(--ok);border:1px solid var(--ok)}
+.tag.down{background:rgba(88,166,255,.15);color:var(--ac);border:1px solid var(--ac)}
+.tag.stall{background:rgba(248,81,73,.15);color:var(--er);border:1px solid var(--er)}
+.tag.tgt{background:rgba(163,113,247,.15);color:var(--tg);border:1px solid var(--tg)}
+.tag.stag{background:rgba(210,153,34,.15);color:var(--wa);border:1px solid var(--wa)}
+/* RATIO BAR */
+.rbwrap{width:80px;height:6px;background:var(--bg3);border-radius:3px;display:inline-block;vertical-align:middle}
+.rbar{height:100%;border-radius:3px;background:var(--ac);transition:width .3s}
+.rbar.full{background:var(--tg)}
+/* SECTION */
+.sec{background:var(--bg2);border:1px solid var(--bd);border-radius:var(--r);padding:20px;margin-bottom:20px}
+.sec-t{font-size:12px;font-weight:600;color:var(--mu);text-transform:uppercase;letter-spacing:.5px;margin-bottom:14px}
+/* LOGS */
+.logarea{background:var(--bg);border:1px solid var(--bd);border-radius:var(--r);font-family:var(--mono);font-size:12px;height:560px;overflow-y:auto;padding:10px}
+.ll{padding:1px 0;line-height:1.65}
+.ll.info{color:var(--tx)}.ll.warn{color:var(--wa)}.ll.err{color:var(--er)}
+.ll.stag{color:var(--wa)}.ll.stall{color:var(--er)}.ll.tgt{color:var(--tg)}.ll.ok{color:var(--ok)}
+/* WS DOT */
+.wdot{width:8px;height:8px;border-radius:50%;background:var(--er);display:inline-block;margin-right:6px;flex-shrink:0}
+.wdot.on{background:var(--ok)}
+/* FORM */
+.flbl{display:block;font-size:12px;color:var(--mu);margin-bottom:4px}
+input,select,textarea{background:var(--bg);border:1px solid var(--bd);border-radius:var(--r);color:var(--tx);font-family:var(--mono);font-size:13px;padding:6px 10px;width:100%}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--ac)}
+textarea{resize:vertical;min-height:80px}
+/* UPLOAD */
+.upzone{border:2px dashed var(--bd);border-radius:var(--r);padding:32px;text-align:center;color:var(--mu);cursor:pointer;transition:border-color .2s}
+.upzone:hover,.upzone.over{border-color:var(--ac);color:var(--tx)}
+.up-title{font-weight:600;margin-top:8px}.up-sub{font-size:12px;margin-top:4px}
+/* ALERT */
+.alert{padding:10px 14px;border-radius:var(--r);font-size:13px;margin-top:10px}
+.alert.ok{background:rgba(63,185,80,.1);border:1px solid var(--ok);color:var(--ok)}
+.alert.er{background:rgba(248,81,73,.1);border:1px solid var(--er);color:var(--er)}
+.alert.hid{display:none}
+/* CHARTS */
+.ch-wrap{background:var(--bg2);border:1px solid var(--bd);border-radius:var(--r);padding:20px;margin-bottom:16px}
+.ch-wrap canvas{max-height:240px}
+/* MISC */
+.muted{color:var(--mu)}
+.ts{font-size:11px;color:var(--mu)}
+.ic{background:var(--bg3);border:1px solid var(--bd);border-radius:3px;padding:1px 5px;font-family:var(--mono);font-size:12px}
+@media(max-width:640px){nav{gap:6px;padding:0 12px}.nav-links a{padding:5px 6px;font-size:12px}main{padding:12px}.cards{grid-template-columns:1fr 1fr}}
+</style>
 </head>
-<body>  <nav class="navbar">
-    <div style="display:flex;align-items:center;gap:8px">
-      <span class="brand">🟢 NewGreedy</span>
-      <span class="ver">v1.6.0</span>
-    </div>
-    <div class="nav-links">
-      <a href="/">Dashboard</a>
-      <a href="/torrents">Torrents</a>
-      <a href="/charts">Charts</a>
-      <a href="/config">Config</a>
-      <a href="/logs">Logs</a>
-      <a href="/help">Help</a>
-    </div>
-  </nav>
-  <div class="container">
-    <h1>Logs <span class="ws-badge" id="ws-status">Connecting...</span></h1>
-    <div class="log-toolbar">
-      <label class="log-opt"><input type="checkbox" id="f-seed" checked> SEEDING</label>
-      <label class="log-opt"><input type="checkbox" id="f-dl"   checked> DOWNLOADING</label>
-      <label class="log-opt"><input type="checkbox" id="f-stag" checked> STAG</label>
-      <label class="log-opt"><input type="checkbox" id="f-stall"checked> STALL</label>
-      <label class="log-opt"><input type="checkbox" id="f-err"  checked> ERRORS</label>
-      <label class="log-opt"><input type="checkbox" id="f-dead" checked> DEAD_TRACKER</label>
-      <label class="log-opt"><input type="checkbox" id="f-conv" checked> CONV_DONE</label>
-      <input id="f-hash" placeholder="Filter by hash…" style="background:var(--surface);color:var(--text);border:1px solid var(--border);padding:4px 10px;border-radius:4px;font-size:12px;width:160px">
-      <button class="btn-outline" onclick="document.getElementById('log-box').innerHTML=''">Clear</button>
-    </div>
-    <div id="log-box"></div>
+<body>
+<nav>
+  <span class="brand">NewGreedy</span>
+  <div class="nav-links">
+    <a href="/"         data-page="dashboard">Dashboard</a>
+    <a href="/torrents" data-page="torrents">Torrents</a>
+    <a href="/charts"   data-page="charts">Charts</a>
+    <a href="/config"   data-page="config">Config</a>
+    <a href="/logs"     data-page="logs">Logs</a>
+    <a href="/help"     data-page="help">Help</a>
   </div>
-<script>
-const box=document.getElementById('log-box');
-const MAX=500;
-function classify(l){
-  if(l.includes('DEAD_TRACKER'))   return 'log-dead';
-  if(l.includes('STALL_ALGO'))     return 'log-stall';
-  if(l.includes('STALL_NET'))      return 'log-stall';
-  if(l.includes('STAG_PROLONGED')) return 'log-stag';
-  if(l.includes('[STAG]'))         return 'log-stag';
-  if(l.includes('CONV_DONE'))      return 'log-conv';
-  if(l.includes('SEEDING'))        return 'log-seed';
-  if(l.includes('DOWNLOADING'))    return 'log-dl';
-  if(l.includes('ERROR')||l.includes('error')) return 'log-err';
-  return '';
-}
-function visible(l){
-  const h=document.getElementById('f-hash').value.trim().toLowerCase();
-  if(h && !l.toLowerCase().includes(h)) return false;
-  if(l.includes('SEEDING')    && !document.getElementById('f-seed').checked)  return false;
-  if(l.includes('DOWNLOADING')&& !document.getElementById('f-dl').checked)    return false;
-  if((l.includes('STAG'))     && !document.getElementById('f-stag').checked)  return false;
-  if((l.includes('STALL'))    && !document.getElementById('f-stall').checked) return false;
-  if((l.includes('ERROR')||l.includes('error'))&&!document.getElementById('f-err').checked) return false;
-  if(l.includes('DEAD_TRACKER')&&!document.getElementById('f-dead').checked)  return false;
-  if(l.includes('CONV_DONE')  && !document.getElementById('f-conv').checked)  return false;
-  return true;
-}
-function append(line){
-  if(!visible(line)) return;
-  const d=document.createElement('div');
-  d.className='log-line '+classify(line);
-  d.textContent=line;
-  box.appendChild(d);
-  while(box.children.length>MAX) box.removeChild(box.firstChild);
-  box.scrollTop=box.scrollHeight;
-}
-const ws=new WebSocket(`ws://${location.host}/ws/logs`);
-const badge=document.getElementById('ws-status');
-ws.onopen=()=>{ badge.className='ws-badge ws-ok'; badge.textContent='Live'; };
-ws.onmessage=e=>append(e.data);
-ws.onerror=ws.onclose=()=>{ badge.className='ws-badge ws-err'; badge.textContent='Disconnected'; };
-fetch('/api/logs?n=200').then(r=>r.json()).then(d=>d.lines.forEach(append));
-</script>
+  <div class="nav-right">
+    <a id="ubadge" href="#"></a>
+    <button id="ttheme">☀️</button>
+  </div>
+</nav>
+<main>
 
+<h1>Live Logs</h1>
+<div class="sec">
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap">
+    <span style="display:flex;align-items:center">
+      <span class="wdot" id="wdot"></span>
+      <span id="wstatus" class="muted" style="font-size:12px">Connecting…</span>
+    </span>
+    <span class="spacer"></span>
+    <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--mu);cursor:pointer">
+      <input type="checkbox" id="autoscroll" checked> Auto-scroll
+    </label>
+    <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--mu);cursor:pointer">
+      <input type="checkbox" id="showAll" checked> Show all
+    </label>
+    <select id="filterHash" style="width:140px;padding:4px 8px;font-size:12px">
+      <option value="">— Hash —</option>
+    </select>
+    <button class="btn" onclick="clearL()">✕ Clear</button>
+    <button class="btn pri" onclick="dlLogs()">⬇ Download</button>
+  </div>
+  <div class="logarea" id="logarea"></div>
+</div>
+<div class="sec">
+  <div class="sec-t">📊 Log analysis</div>
+  <div class="cards" style="margin-bottom:0" id="logstats">
+    <div class="card"><div class="clbl">Total lines</div><div class="cval" id="ls_tot">0</div></div>
+    <div class="card"><div class="clbl">TARGET REACHED</div><div class="cval tg" id="ls_tgt">0</div></div>
+    <div class="card"><div class="clbl">STALL_NET</div><div class="cval er" id="ls_stall">0</div></div>
+    <div class="card"><div class="clbl">STAG</div><div class="cval wa" id="ls_stag">0</div></div>
+    <div class="card"><div class="clbl">PURGED</div><div class="cval muted" id="ls_purge">0</div></div>
+  </div>
+</div>
+
+</main>
+<script>
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+const API={
+  get:u=>fetch(u).then(r=>{if(!r.ok)throw new Error(r.status);return r.json()}),
+  post:(u,b)=>fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(r=>r.json()),
+  del:u=>fetch(u,{method:'DELETE'}).then(r=>r.json())
+};
+function fB(b){if(!b||b===0)return'0 B';const g=b/1e9;if(g>=1)return g.toFixed(2)+' GB';return(b/1e6).toFixed(1)+' MB';}
+function fR(r){if(r==null||isNaN(r)||r===0)return'—';return(+r).toFixed(3);}
+function fE(n){if(!n||n<=0)return'—';return'~'+n+' ann';}
+
+// Mode: derived from stats.json fields
+// cumul_rep_dl==0 && !target_reached => SEED (left=0, pur seeder)
+// cumul_rep_dl>0 && !target_reached && !stalled => DOWN
+// stalled => STALL
+// target_reached => TARGET
+function getMode(d){
+  if(d.target_reached) return 'TARGET';
+  if(d.stalled) return 'STALL';
+  if(!d.cumul_rep_dl || d.cumul_rep_dl===0) return 'SEED';
+  return 'DOWN';
+}
+function stag(d){
+  const m=getMode(d);
+  if(m==='TARGET') return '<span class="tag tgt">Target ✓</span>';
+  if(m==='STALL')  return '<span class="tag stall">Stall</span>';
+  if(m==='SEED')   return '<span class="tag seed">Seed</span>';
+  return '<span class="tag down">Down</span>';
+}
+function modeTxt(d){
+  const m=getMode(d);
+  if(m==='TARGET') return '<span style="color:var(--tg)">TARGET</span>';
+  if(m==='STALL')  return '<span style="color:var(--er)">STALL</span>';
+  if(m==='SEED')   return '<span style="color:var(--ok)">SEED</span>';
+  return '<span style="color:var(--ac)">DOWN</span>';
+}
+function rbar(ratio,tgt){
+  const pct=Math.min(100,((ratio||0)/(tgt||1.6))*100);
+  const full=pct>=100;
+  return '<div class="rbwrap"><div class="rbar'+(full?' full':'')+'" style="width:'+pct.toFixed(1)+'%"></div></div>';
+}
+function ratioNum(d){
+  if(!d.cumul_rep_dl||d.cumul_rep_dl===0) return null;
+  return d.cumul_rep_ul/d.cumul_rep_dl;
+}
+
+// ── theme ────────────────────────────────────────────────────────────────────
+function initUI(page){
+  const t=document.getElementById('ttheme');
+  const light=localStorage.getItem('ng_theme')==='light';
+  if(light) document.body.classList.add('light');
+  if(t) t.textContent=light?'🌙':'☀️';
+  if(t) t.addEventListener('click',()=>{
+    const l=document.body.classList.toggle('light');
+    localStorage.setItem('ng_theme',l?'light':'dark');
+    t.textContent=l?'🌙':'☀️';
+  });
+  // active nav link
+  document.querySelectorAll('.nav-links a').forEach(a=>{
+    if(a.dataset.page===page) a.classList.add('active');
+  });
+  // version check
+  fetch('/api/version').then(r=>r.json()).then(v=>{
+    const b=document.getElementById('ubadge');
+    if(!b)return;
+    if(v.update_available){
+      b.textContent='↑ '+v.latest;
+      b.href=v.url||'#';
+      b.target='_blank';
+      b.style.display='inline-block';
+    }
+  }).catch(()=>{});
+}
+
+
+var _ws=null, _lines=[], _max=1200, _hashes=new Set();
+
+function clf(t){
+  if(/TARGET_REACHED/i.test(t)) return 'll tgt';
+  if(/PURGED/i.test(t))          return 'll ok';
+  if(/ERROR|FAIL|EXCEPTION/i.test(t)) return 'll err';
+  if(/STALL_NET|STALL_ALGO/i.test(t)) return 'll stall';
+  if(/STAG/i.test(t))            return 'll stag';
+  if(/WARNING|WARN/i.test(t))    return 'll warn';
+  return 'll info';
+}
+
+function updateStats(){
+  document.getElementById('ls_tot').textContent=_lines.length;
+  document.getElementById('ls_tgt').textContent=_lines.filter(l=>/TARGET_REACHED/i.test(l)).length;
+  document.getElementById('ls_stall').textContent=_lines.filter(l=>/STALL_NET/i.test(l)).length;
+  document.getElementById('ls_stag').textContent=_lines.filter(l=>/\[STAG\]/i.test(l)).length;
+  document.getElementById('ls_purge').textContent=_lines.filter(l=>/PURGED/i.test(l)).length;
+}
+
+function extractHash(t){
+  // format: [MODE] HASH | ...  ou  [PURGED] HASH
+  var m=t.match(/\]\s+([0-9a-f]{8})/i);
+  return m?m[1].toLowerCase():null;
+}
+
+function appendLine(t){
+  _lines.push(t);
+  if(_lines.length>_max) _lines.shift();
+  // hash index
+  var h=extractHash(t);
+  if(h&&!_hashes.has(h)){
+    _hashes.add(h);
+    var sel=document.getElementById('filterHash');
+    var o=document.createElement('option');o.value=h;o.textContent=h;sel.appendChild(o);
+  }
+  // filter
+  var fh=document.getElementById('filterHash').value;
+  var showAll=document.getElementById('showAll').checked;
+  if(fh && !t.includes(fh)) return;
+  if(!showAll && clf(t)==='ll info' && !/\[SEED\]|\[DOWN\]/i.test(t)) return;
+  var la=document.getElementById('logarea');
+  var d=document.createElement('div'); d.className=clf(t); d.textContent=t;
+  la.appendChild(d);
+  while(la.children.length>_max) la.removeChild(la.firstChild);
+  if(document.getElementById('autoscroll').checked) la.scrollTop=la.scrollHeight;
+  updateStats();
+}
+
+function rerender(){
+  var la=document.getElementById('logarea'); la.innerHTML='';
+  var fh=document.getElementById('filterHash').value;
+  var showAll=document.getElementById('showAll').checked;
+  _lines.forEach(t=>{
+    if(fh && !t.includes(fh)) return;
+    if(!showAll && clf(t)==='ll info' && !/\[SEED\]|\[DOWN\]/i.test(t)) return;
+    var d=document.createElement('div'); d.className=clf(t); d.textContent=t;
+    la.appendChild(d);
+  });
+  if(document.getElementById('autoscroll').checked) la.scrollTop=la.scrollHeight;
+}
+document.getElementById('filterHash').addEventListener('change',rerender);
+document.getElementById('showAll').addEventListener('change',rerender);
+
+function clearL(){document.getElementById('logarea').innerHTML='';_lines=[];}
+function dlLogs(){
+  var b=new Blob([_lines.join('\n')],{type:'text/plain'});
+  var a=document.createElement('a');a.href=URL.createObjectURL(b);
+  a.download='newgreedy-'+new Date().toISOString().slice(0,10)+'.log';a.click();
+}
+
+function connect(){
+  var proto=location.protocol==='https:'?'wss:':'ws:';
+  _ws=new WebSocket(proto+'//'+location.host+'/ws/logs');
+  _ws.onopen=()=>{
+    document.getElementById('wdot').className='wdot on';
+    document.getElementById('wstatus').textContent='Connected';
+  };
+  _ws.onclose=()=>{
+    document.getElementById('wdot').className='wdot';
+    document.getElementById('wstatus').textContent='Disconnected — reconnecting…';
+    setTimeout(connect,3000);
+  };
+  _ws.onerror=()=>{document.getElementById('wstatus').textContent='WS Error';};
+  _ws.onmessage=e=>{
+    try{
+      var d=JSON.parse(e.data);
+      if(d.lines) d.lines.forEach(appendLine);
+      else if(d.line) appendLine(d.line);
+    }catch(x){appendLine(e.data);}
+  };
+}
+connect();
+
+initUI('logs');
+</script>
 </body>
 </html>
