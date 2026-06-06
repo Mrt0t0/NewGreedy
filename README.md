@@ -69,7 +69,6 @@ Injection stops automatically when `target_ratio` is reached (`auto_stop_at_targ
 - Pure seeder `downloaded` field now sends a stable hash-derived value instead of `0`
 - Mode SEED/DOWN written explicitly to `stats.json` (was a JS heuristic, often wrong)
 - Manual purge now also removes untracked legacy entries (pre-v1.7 stats)
-- All web UI strings translated to English
 
 ---
 
