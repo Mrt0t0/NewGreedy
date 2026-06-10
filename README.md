@@ -6,7 +6,7 @@
 
 [![Version](https://img.shields.io/badge/version-1.7.0-blue?style=flat-square)](https://github.com/Mrt0t0/NewGreedy/releases)
 [![Python](https://img.shields.io/badge/python-3.9%2B-green?style=flat-square)](https://python.org)
-[![License](https://img.shields.io/badge/license-MIT-gray?style=flat-square)](LICENSE)
+[![License: GPL v3](https://img.shields.io/badge/license-GPL%20v3-blue?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows%20%7C%20Docker-lightgray?style=flat-square)](https://github.com/Mrt0t0/NewGreedy)
 
 </div>
