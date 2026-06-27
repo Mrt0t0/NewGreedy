@@ -1,6 +1,6 @@
 param([switch]$Update, [switch]$Uninstall)
 
-$Version  = "v1.7.0"
+$Version  = "v1.7.5"
 $Dest     = "$env:LOCALAPPDATA\NewGreedy"
 $TaskName = "NewGreedy"
 $LogFile  = "$Dest\install.log"
