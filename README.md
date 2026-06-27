@@ -464,7 +464,7 @@ GET    /api/tracker_stats                                     # per-domain ratio
 ### v1.7.0
 - Ratio history charts, `inject_hours` active window, `.torrent` file import
 - Dark / light theme toggle, Real UL vs Injected UL columns
-- Auto-purge after 12 h inactivity, full English web UI
+- Auto-purge after 12 h inactivity
 
 ### v1.6.5
 - Fixed `STALL_ALGO` blocking at ~40%, fixed `STALL_NET` false positives on pure seeders
