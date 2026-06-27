@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""NewGreedy v1.7.0 — core addon"""
-import random, math, time, json, re, logging, struct, configparser
+"""NewGreedy v1.7.5 — core addon"""
+import random, math, time, json, re, logging, struct, configparser, threading
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs, unquote_to_bytes
 from mitmproxy import http
 import pathlib
 
-VERSION       = "v1.7.0"
-SCHEMA_VER    = 3
+VERSION       = "v1.7.5"
+SCHEMA_VER    = 4
 _BASE         = pathlib.Path(__file__).parent.resolve()
 LOG_FILE      = str(_BASE / "newgreedy.log")
 STATS_FILE    = str(_BASE / "stats.json")
@@ -39,6 +39,9 @@ UA_ACCEPT = {
     "Deluge": "*/*",
     "libtorrent": "text/plain, application/x-bittorrent",
 }
+
+TRACKER_BACKOFF_THRESHOLD = 3
+TRACKER_BACKOFF_MAX_S     = 1800
 
 
 def _rand_peer_id():
@@ -128,8 +131,13 @@ def _pareto_noise(inc: float, noise_pct: float) -> float:
 def _parse_hours(spec: str):
     try:
         parts = spec.strip().split("-")
-        return int(parts[0]), int(parts[1])
+        lo, hi = int(parts[0]), int(parts[1])
+        if not (0 <= lo <= 23) or not (0 <= hi <= 23):
+            logger.warning("inject_hours '%s' out of range 0-23 — falling back to 0-23", spec)
+            return 0, 23
+        return lo, hi
     except Exception:
+        logger.warning("inject_hours '%s' invalid — falling back to 0-23", spec)
         return 0, 23
 
 
@@ -145,7 +153,7 @@ class TorrentStats:
         self._stall_thr      = cfg.getint("advanced", "stall_announce_threshold", fallback=8)
         self._min_ann_stag   = cfg.getint("advanced", "min_announces_before_stagnation", fallback=10)
         self._target_buf     = cfg.getfloat("spoofing", "target_ratio_buffer", fallback=0.03)
-        self._corrupt_p      = cfg.getfloat("advanced", "corrupt_field_probability", fallback=0.20)
+        self._corrupt_p      = cfg.getfloat("advanced", "corrupt_field_probability", fallback=0.05)
         base_target          = cfg.getfloat("spoofing", "target_ratio", fallback=1.5)
         self._target_ratio   = base_target + self._target_buf
         self._auto_stop      = cfg.getboolean("spoofing", "auto_stop_at_target", fallback=True)
@@ -185,6 +193,8 @@ class TorrentStats:
     def _calc_upload(self, real_ul, cum_dl, interval, ann):
         if not self._in_active_hours():
             return self._cumul_rep_ul, True
+        if self._auto_stop and self._target_reached:
+            return self._cumul_rep_ul + (real_ul * random.uniform(0.9, 1.1) if real_ul > 0 else 0), False
         if cum_dl <= 0:
             inc = real_ul * random.uniform(1.2, 1.6) if real_ul > 0 else self._seed_credit * random.uniform(0.8, 1.2)
             return self._cumul_rep_ul + min(inc, self._max_speed * interval), False
@@ -247,16 +257,21 @@ class NewGreedyAddon:
         c                    = self._cfg
         self._stats          = {}
         self._tracker_cumul  = {}
+        self._tracker_errors = {}
         self._last_seen      = {}
         self._ports          = {}
         self._peer_ids       = {}
         self._uas            = {}
         self._swarm_leechers = {}
+        self._save_lock      = threading.Lock()
+        self._last_flush_ts  = 0.0
+        self._flush_interval = 60.0
+        self._registry       = self._load_registry()
         self._max_global_r   = c.getfloat("spoofing", "max_global_ratio_per_tracker", fallback=2.5)
         self._min_interval   = c.getint("advanced", "min_announce_interval", fallback=1800)
         self._jitter_pct     = c.getfloat("advanced", "interval_jitter_pct", fallback=0.08)
         self._event_anom_p   = c.getfloat("advanced", "event_anomaly_probability", fallback=0.03)
-        self._corrupt_p      = c.getfloat("advanced", "corrupt_field_probability", fallback=0.20)
+        self._corrupt_p      = c.getfloat("advanced", "corrupt_field_probability", fallback=0.05)
         self._spoof_ua       = c.getboolean("anti_detection", "spoof_user_agent", fallback=True)
         self._spoof_pid      = c.getboolean("anti_detection", "spoof_peer_id", fallback=True)
         self._spoof_peers    = c.getboolean("anti_detection", "spoof_peers", fallback=True)
@@ -275,11 +290,19 @@ class NewGreedyAddon:
                     VERSION, c.get("proxy", "listen_port", fallback="3456"))
 
     def _load_stats(self):
-        VALID = re.compile(r"[0-9a-f]{6,40}")
+        VALID = re.compile(r"^[0-9a-f]{6,40}$")
         try:
             with open(STATS_FILE) as f:
                 raw = json.load(f)
             schema = raw.get("_schema_version", 1)
+            tc_raw = raw.get("_tracker_cumul", {})
+            if isinstance(tc_raw, dict):
+                for domain, vals in tc_raw.items():
+                    if isinstance(vals, dict):
+                        self._tracker_cumul[domain] = {
+                            "ul": float(vals.get("ul", 0)),
+                            "dl": float(vals.get("dl", 0)),
+                        }
             loaded = 0
             for k, d in raw.items():
                 if k.startswith("_"):
@@ -311,35 +334,44 @@ class NewGreedyAddon:
         except Exception as e:
             logger.warning("Stats load error: %s", e)
 
-    def _save_stats(self):
-        try:
-            cutoff = time.time() - 43200
-            data = {"_schema_version": SCHEMA_VER}
-            purged = []
-            for ih, s in self._stats.items():
-                if s._last_announce_ts > 0 and s._last_announce_ts < cutoff and s._ann_count >= 5:
-                    purged.append(ih)
-                    continue
-                data[ih] = {
-                    "cumul_rep_ul":    s._cumul_rep_ul,
-                    "cumul_rep_dl":    s._cumul_rep_dl,
-                    "cumul_real_ul":   s._cumul_real_ul,
-                    "ann_count":       s._ann_count,
-                    "stalled":         s._is_net_stalled,
-                    "prev_rep_ul":     s._prev_rep_ul,
-                    "target_reached":  s._target_reached,
-                    "seed_fake_dl":    s._seed_fake_dl,
-                    "history":         s._history[-100:],
-                    "mode":            s._mode,
-                    "last_announce_ts":s._last_announce_ts,
+    def _save_stats(self, force=False):
+        now = time.time()
+        if not force and (now - self._last_flush_ts) < self._flush_interval:
+            return
+        with self._save_lock:
+            try:
+                cutoff = now - 43200
+                data = {"_schema_version": SCHEMA_VER}
+                data["_tracker_cumul"] = {
+                    domain: {"ul": tc["ul"], "dl": tc["dl"]}
+                    for domain, tc in dict(self._tracker_cumul).items()
                 }
-            for ih in purged:
-                del self._stats[ih]
-                logger.info("[AUTO-PURGE] %s — no announce for 12h+", ih)
-            with open(STATS_FILE, "w") as f:
-                json.dump(data, f, indent=2)
-        except Exception as e:
-            logger.warning("Stats save failed: %s", e)
+                purged = []
+                for ih, s in dict(self._stats).items():
+                    if s._last_announce_ts > 0 and s._last_announce_ts < cutoff and s._ann_count >= 5:
+                        purged.append(ih)
+                        continue
+                    data[ih] = {
+                        "cumul_rep_ul":    s._cumul_rep_ul,
+                        "cumul_rep_dl":    s._cumul_rep_dl,
+                        "cumul_real_ul":   s._cumul_real_ul,
+                        "ann_count":       s._ann_count,
+                        "stalled":         s._is_net_stalled,
+                        "prev_rep_ul":     s._prev_rep_ul,
+                        "target_reached":  s._target_reached,
+                        "seed_fake_dl":    s._seed_fake_dl,
+                        "history":         s._history[-100:],
+                        "mode":            s._mode,
+                        "last_announce_ts":s._last_announce_ts,
+                    }
+                for ih in purged:
+                    del self._stats[ih]
+                    logger.info("[AUTO-PURGE] %s — no announce for 12h+", ih)
+                with open(STATS_FILE, "w") as f:
+                    json.dump(data, f, indent=2)
+                self._last_flush_ts = now
+            except Exception as e:
+                logger.warning("Stats save failed: %s", e)
 
     def _is_announce(self, url):
         p = urlparse(url)
@@ -353,16 +385,45 @@ class NewGreedyAddon:
             return any(w in domain for w in self._wl)
         return True
 
+    def _tracker_in_backoff(self, domain) -> bool:
+        err = self._tracker_errors.get(domain)
+        if not err:
+            return False
+        count, last_ts = err
+        if count < TRACKER_BACKOFF_THRESHOLD:
+            return False
+        backoff = min(300 * (2 ** (count - TRACKER_BACKOFF_THRESHOLD)), TRACKER_BACKOFF_MAX_S)
+        return (time.time() - last_ts) < backoff
+
+    def _record_tracker_error(self, domain):
+        err = self._tracker_errors.get(domain, (0, 0))
+        count = err[0] + 1
+        self._tracker_errors[domain] = (count, time.time())
+        if count == TRACKER_BACKOFF_THRESHOLD:
+            logger.warning("[TRACKER_DOWN] %s — %d consecutive errors, entering backoff", domain, count)
+
+    def _record_tracker_success(self, domain):
+        if domain in self._tracker_errors:
+            prev_count = self._tracker_errors[domain][0]
+            del self._tracker_errors[domain]
+            if prev_count >= TRACKER_BACKOFF_THRESHOLD:
+                logger.info("[TRACKER_UP] %s — recovered", domain)
+
+    def _load_registry(self):
+        try:
+            with open(REGISTRY_FILE) as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
     def _get_stats(self, ih, ih_full=""):
         if ih not in self._stats:
             st = TorrentStats(self._cfg)
-            try:
-                with open(REGISTRY_FILE) as f:
-                    reg = json.load(f)
-                if ih in reg:
-                    st._seed_fake_dl = float(reg[ih].get("size_bytes", 0))
-            except Exception:
-                pass
+            if ih in self._registry:
+                try:
+                    st._seed_fake_dl = float(self._registry[ih].get("size_bytes", 0))
+                except Exception:
+                    pass
             self._stats[ih] = st
         return self._stats[ih]
 
@@ -381,6 +442,8 @@ class NewGreedyAddon:
         if not self._is_announce(url):
             return
         domain    = _tracker_domain(url)
+        if self._tracker_in_backoff(domain):
+            return
         raw_path  = flow.request.data.path
         q_start   = raw_path.find(b"?")
         raw_query = raw_path[q_start + 1:] if q_start != -1 else b""
@@ -407,7 +470,7 @@ class NewGreedyAddon:
                 self._peer_ids.pop(ih_key, None)
                 self._uas.pop(ih_key, None)
                 if self._persist:
-                    self._save_stats()
+                    self._save_stats(force=True)
                 logger.info("[PURGED] %s — removed after event=stopped", ih_key)
             return
 
@@ -424,11 +487,17 @@ class NewGreedyAddon:
 
         new_ul, new_dl, delta_ul, is_stag, corrupt_val = st.compute(real_ul, real_dl, interval, event)
 
-        tc       = self._tracker_cumul.setdefault(domain, {"ul": 0.0, "dl": 0.0})
-        tc["ul"] += delta_ul
+        tc = self._tracker_cumul.setdefault(domain, {"ul": 0.0, "dl": 0.0})
         tc["dl"] += real_dl
-        if tc["dl"] > 0 and tc["ul"] / tc["dl"] > self._max_global_r:
-            new_ul = max(st._prev_rep_ul, new_ul - (tc["ul"] - self._max_global_r * tc["dl"]))
+        if tc["dl"] > 0 and (tc["ul"] + delta_ul) / tc["dl"] > self._max_global_r:
+            allowed_delta = max(0.0, self._max_global_r * tc["dl"] - tc["ul"])
+            new_ul = st._prev_rep_ul + allowed_delta
+            new_ul = max(st._prev_rep_ul, new_ul)
+            delta_ul = new_ul - st._cumul_rep_ul
+            st._cumul_rep_ul = st._prev_rep_ul = new_ul
+            logger.info("[GLOBAL_CAP] %s | tracker_ratio capped → UL adjusted to %.1fM",
+                        domain, new_ul / 1e6)
+        tc["ul"] += delta_ul
 
         is_pure_seeder = (left == 0 and real_dl == 0)
         patches = {"uploaded": int(new_ul)}
@@ -505,7 +574,7 @@ class NewGreedyAddon:
             logger.info("[%-4s] %-8s | UL:%7.1fM +%6.1fM #%d%s",
                         mode, ih_key, cum_ul, delta, st._ann_count, flags)
 
-        if self._persist and (st._ann_count == 1 or st._ann_count % 5 == 0):
+        if self._persist:
             self._save_stats()
 
     def response(self, flow: http.HTTPFlow):
@@ -521,6 +590,11 @@ class NewGreedyAddon:
             return
         ih_key = ih_hex[:8]
         try:
+            status = flow.response.status_code
+            if status >= 500:
+                self._record_tracker_error(domain)
+            else:
+                self._record_tracker_success(domain)
             body       = flow.response.content
             incomplete = _bencode_get_int(body, b"incomplete")
             if incomplete >= 0:
@@ -535,7 +609,7 @@ class NewGreedyAddon:
 
     def done(self):
         if self._persist:
-            self._save_stats()
+            self._save_stats(force=True)
         logger.info("NewGreedy %s stopping — stats saved.", VERSION)
 
 

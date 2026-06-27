@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""NewGreedy v1.7.0 — Web UI & API"""
-import configparser, hashlib, json, os, pathlib, logging, asyncio, re, urllib.request
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File
+"""NewGreedy v1.7.5 — Web UI & API"""
+import configparser, hashlib, json, pathlib, logging, asyncio, re, urllib.request, time
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Query
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse
 
-VERSION      = "v1.7.0"
+VERSION      = "v1.7.5"
 GITHUB_REPO  = "Mrt0t0/NewGreedy"
 
 app      = FastAPI(title="NewGreedy Web UI")
@@ -22,36 +22,66 @@ if STATIC_DIR.exists():
 
 VALID_HASH_RE = re.compile(r"^[0-9a-f]{8,40}$")
 
+_raw_cache      = None
+_raw_cache_ts   = 0.0
+_raw_cache_ttl  = 2.0
+
 
 def set_config(c):
     global _cfg
     _cfg = c
 
 
-def _load_stats():
+def _read_stats_file():
+    global _raw_cache, _raw_cache_ts
+    now = time.monotonic()
+    if _raw_cache is not None and (now - _raw_cache_ts) < _raw_cache_ttl:
+        return _raw_cache
     try:
         with open(STATS_FILE) as f:
             raw = json.load(f)
-        return {
-            k: v for k, v in raw.items()
-            if not k.startswith("_")
-            and VALID_HASH_RE.match(k)
-            and isinstance(v, dict)
-            and "cumul_rep_ul" in v
-        }
     except Exception:
-        return {}
+        raw = {}
+    _raw_cache    = raw
+    _raw_cache_ts = now
+    return raw
+
+
+def _invalidate_cache():
+    global _raw_cache
+    _raw_cache = None
+
+
+def _load_stats():
+    raw = _read_stats_file()
+    return {
+        k: v for k, v in raw.items()
+        if not k.startswith("_")
+        and VALID_HASH_RE.match(k)
+        and isinstance(v, dict)
+        and "cumul_rep_ul" in v
+    }
+
+
+def _load_tracker_cumul():
+    raw = _read_stats_file()
+    tc = raw.get("_tracker_cumul", {})
+    return tc if isinstance(tc, dict) else {}
 
 
 def _tail_log(n=500):
     try:
+        approx = max(32768, n * 256)
         with open(LOG_FILE, "rb") as f:
             f.seek(0, 2)
             size = f.tell()
-            pos  = max(0, size - 32768)
+            pos  = max(0, size - approx)
             f.seek(pos)
             buf  = f.read()
-        return buf.decode("utf-8", errors="replace").splitlines()[-n:]
+        lines = buf.decode("utf-8", errors="replace").splitlines()
+        if pos > 0 and lines:
+            lines = lines[1:]
+        return lines[-n:]
     except Exception:
         return []
 
@@ -59,7 +89,7 @@ def _tail_log(n=500):
 @app.get("/", response_class=HTMLResponse)
 async def index():
     f = STATIC_DIR / "index.html"
-    return f.read_text() if f.exists() else "<h1>NewGreedy v1.7.0</h1>"
+    return f.read_text() if f.exists() else "<h1>NewGreedy v1.7.5</h1>"
 
 
 @app.get("/{page}", response_class=HTMLResponse)
@@ -91,6 +121,32 @@ async def api_stats():
     return result
 
 
+@app.get("/api/tracker_stats")
+async def api_tracker_stats():
+    tc = _load_tracker_cumul()
+    cfg_max = 2.5
+    if _cfg:
+        try:
+            cfg_max = float(_cfg.get("spoofing", "max_global_ratio_per_tracker", fallback="2.5"))
+        except Exception:
+            pass
+    result = {}
+    for domain, vals in tc.items():
+        if not isinstance(vals, dict):
+            continue
+        ul = float(vals.get("ul", 0))
+        dl = float(vals.get("dl", 0))
+        ratio = round(ul / dl, 4) if dl > 0 else None
+        result[domain] = {
+            "ul_mb":      round(ul / 1e6, 2),
+            "dl_mb":      round(dl / 1e6, 2),
+            "ratio":      ratio,
+            "cap":        cfg_max,
+            "pct_of_cap": round((ratio / cfg_max) * 100, 1) if ratio is not None else None,
+        }
+    return result
+
+
 @app.get("/api/health")
 async def api_health():
     data      = _load_stats()
@@ -116,7 +172,7 @@ async def api_history_single(ih: str):
 
 
 @app.get("/api/logs")
-async def api_logs(lines: int = 100):
+async def api_logs(lines: int = Query(default=100, ge=10, le=2000)):
     return {"lines": _tail_log(lines)}
 
 
@@ -165,10 +221,10 @@ async def api_stats_csv():
     data = _load_stats()
     rows = ["hash,mode,dl_mb,ul_mb,delta_ul_mb,ratio,size_mb,ann_count,stalled,target_reached"]
     for ih, d in data.items():
-        ul   = d.get("cumul_rep_ul", 0) / 1e6
-        dl   = d.get("cumul_rep_dl", 0) / 1e6
-        size = d.get("estimated_size_mb", 0)
-        ratio = round(ul / (dl * 1e6), 4) if dl > 0 else ""
+        ul    = d.get("cumul_rep_ul", 0) / 1e6
+        dl    = d.get("cumul_rep_dl", 0) / 1e6
+        size  = d.get("estimated_size_mb", 0)
+        ratio = round(ul / dl, 4) if dl > 0 else ""
         mode  = "SEED" if dl == 0 else "DOWN"
         rows.append(
             f"{ih},{mode},{dl:.2f},{ul:.2f},,{ratio},{size:.2f},"
@@ -210,26 +266,42 @@ async def api_upload_torrent(file: UploadFile = File(...)):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@app.get("/api/stats/purge")
+async def purge_stats_preview(keep_active: bool = True, inactive_hours: int = 0):
+    try:
+        with open(STATS_FILE) as f:
+            data = json.load(f)
+    except Exception:
+        data = {}
+    cutoff = time.time() - inactive_hours * 3600 if inactive_hours > 0 else 0
+    if keep_active:
+        to_del = [k for k, v in data.items()
+                  if VALID_HASH_RE.match(k) and isinstance(v, dict) and (
+                      v.get("target_reached", False)
+                      or (cutoff > 0 and float(v.get("last_announce_ts", 0)) < cutoff)
+                  )]
+    else:
+        to_del = [k for k in data if VALID_HASH_RE.match(k) and isinstance(data[k], dict)]
+    return {"would_purge": len(to_del), "hashes": to_del, "keep_active": keep_active, "inactive_hours": inactive_hours}
+
+
 @app.delete("/api/stats/purge")
 async def purge_stats(keep_active: bool = True, inactive_hours: int = 0):
-    import time as _time
     try:
         with open(STATS_FILE) as f:
             data = json.load(f)
     except Exception:
         data = {}
     before = len([k for k in data if VALID_HASH_RE.match(k)])
-    cutoff = _time.time() - inactive_hours * 3600 if inactive_hours > 0 else 0
+    cutoff = time.time() - inactive_hours * 3600 if inactive_hours > 0 else 0
     if keep_active:
         to_del = [k for k, v in data.items()
                   if VALID_HASH_RE.match(k) and isinstance(v, dict) and (
                       v.get("target_reached", False)
-                      or (cutoff > 0
-                          and float(v.get("last_announce_ts", 0)) > 0
-                          and float(v.get("last_announce_ts", 0)) < cutoff)
+                      or (cutoff > 0 and float(v.get("last_announce_ts", 0)) < cutoff)
                   )]
     else:
-        to_del = [k for k in data if VALID_HASH_RE.match(k)]
+        to_del = [k for k in data if VALID_HASH_RE.match(k) and isinstance(data[k], dict)]
     for k in to_del:
         del data[k]
     try:
@@ -237,17 +309,36 @@ async def purge_stats(keep_active: bool = True, inactive_hours: int = 0):
             json.dump(data, f, indent=2)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+    _invalidate_cache()
     after = len([k for k in data if VALID_HASH_RE.match(k)])
     return {"purged": before - after, "remaining": after, "keep_active": keep_active, "inactive_hours": inactive_hours}
 
 
-ws_clients = []
+@app.delete("/api/stats/{ih}")
+async def delete_torrent_stat(ih: str):
+    ih = ih[:8].lower()
+    if not VALID_HASH_RE.match(ih):
+        return JSONResponse({"error": "invalid hash"}, status_code=400)
+    try:
+        with open(STATS_FILE) as f:
+            data = json.load(f)
+    except Exception:
+        data = {}
+    if ih not in data:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    del data[ih]
+    try:
+        with open(STATS_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    _invalidate_cache()
+    return {"deleted": ih}
 
 
 @app.websocket("/ws/logs")
 async def ws_logs(ws: WebSocket):
     await ws.accept()
-    ws_clients.append(ws)
     for line in _tail_log(500):
         if line.strip():
             await ws.send_text(line)
@@ -278,9 +369,6 @@ async def ws_logs(ws: WebSocket):
             await asyncio.sleep(1)
     except WebSocketDisconnect:
         pass
-    finally:
-        if ws in ws_clients:
-            ws_clients.remove(ws)
 
 
 def _torrent_info(raw: bytes):

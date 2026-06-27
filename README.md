@@ -4,9 +4,9 @@
 
 ### BitTorrent announce proxy — Upload ratio spoofer
 
-[![Version](https://img.shields.io/badge/version-1.7.0-blue?style=flat-square)](https://github.com/Mrt0t0/NewGreedy/releases)
+[![Version](https://img.shields.io/badge/version-1.7.5-blue?style=flat-square)](https://github.com/Mrt0t0/NewGreedy/releases)
 [![Python](https://img.shields.io/badge/python-3.9%2B-green?style=flat-square)](https://python.org)
-[![License: GPL v3](https://img.shields.io/badge/license-GPL%20v3-blue?style=flat-square)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-gray?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows%20%7C%20Docker-lightgray?style=flat-square)](https://github.com/Mrt0t0/NewGreedy)
 
 </div>
@@ -36,6 +36,7 @@ Torrent client  ──► NewGreedy :3456 (proxy)  ──► Tracker
                          ├─ Intercepts announces (HTTP + HTTPS via mitmproxy)
                          ├─ Rewrites: uploaded / downloaded / peer_id / port / numwant
                          ├─ Applies ratio engine (non-linear progression, noise, stagnation)
+                         ├─ Guards per-tracker global ratio cap
                          └─ Forwards patched request to tracker
 ```
 
@@ -46,7 +47,7 @@ remaining  = target_ul − cumul_reported_ul
 increment  = remaining × catch_up_factor × e^(−decay) × Pareto_noise
              capped at max_simulated_speed_mbps × interval
              capped at max_ratio_per_torrent × cumul_downloaded
-             capped by global tracker ratio guard
+             capped by global tracker ratio guard (corrected before accumulation)
              ──► cumul_rep_ul sent to tracker as `uploaded`
 ```
 
@@ -54,21 +55,94 @@ Injection stops automatically when `target_ratio` is reached (`auto_stop_at_targ
 
 ---
 
-## v1.7.0 — Changes from v1.6.5
+## v1.7.5 — Full changelog
 
-**New:**
-- Ratio history recorded every 5 announces → time-series charts in the web UI
-- Hourly injection scheduler (`inject_hours`) — restrict active window, e.g. `8-22`
-- `.torrent` file import to pre-register infohash + file size before first announce
-- Real UL vs Injected UL shown as separate columns in the Torrents table
-- Auto-purge of torrents inactive for 12 h (no announce received)
-- Dark / light theme toggle in the navbar (preference saved in browser)
+### Front-end refactor (CSS / JS deduplication)
 
-**Fixed:**
-- `configparser` now correctly parses inline comments in `config.ini` — prevented startup
-- Pure seeder `downloaded` field now sends a stable hash-derived value instead of `0`
-- Mode SEED/DOWN written explicitly to `stats.json` (was a JS heuristic, often wrong)
-- Manual purge now also removes untracked legacy entries (pre-v1.7 stats)
+**Single shared stylesheet**
+The 96-line CSS block that was duplicated inline in all six HTML pages is now served once from `static/style.css` via `<link rel="stylesheet" href="/static/style.css">`. The CSS is byte-for-byte identical to the previous inline block — the UI appearance is unchanged.
+
+**Single shared script**
+The common front-end helpers (`fB`, `fR`, `fE`, `fAge`, `getMode`, `stag`, `modeTxt`, `rbar`, `ratioNum`, `initUI`) that were copy-pasted into every page are now defined once in `static/app.js` and loaded via `<script src="/static/app.js">`. Each page keeps only its page-specific logic.
+
+**Result:** total HTML payload reduced from ~91 KB to ~34 KB (−62%). Editing a shared style or helper now touches one file instead of six.
+
+### Robustness fixes (code review pass)
+
+**FastAPI routing order — `purge` vs `{ih}`**
+`DELETE /api/stats/purge` is now declared before `DELETE /api/stats/{ih}`. Previously the dynamic route captured `purge` as a hash and returned `not found`, making the purge endpoint unreachable.
+
+**Race condition in `_save_stats`**
+The flush thread now iterates over `dict(self._stats)` and `dict(self._tracker_cumul)` snapshots instead of the live dicts, preventing `RuntimeError: dictionary changed size during iteration` when an announce arrives mid-flush.
+
+**Anchored hash regex**
+`_load_stats` validation regex changed from `[0-9a-f]{6,40}` to `^[0-9a-f]{6,40}$` so partial or malformed keys can no longer match.
+
+**Unified stats cache**
+`_load_stats` and `_load_tracker_cumul` now share a single cached file read (`_read_stats_file`, 2 s TTL). `/api/tracker_stats` no longer triggers a second disk read per poll.
+
+**Registry cached at startup**
+`torrent_registry.json` is loaded once into `self._registry` instead of being re-read on every new torrent in the announce hot path.
+
+**`inject_hours` validation**
+Out-of-range or malformed `inject_hours` values now log a warning and fall back to `0-23` instead of silently disabling injection all day.
+
+**`_tail_log` no longer truncates mid-line**
+Reads `max(32768, n * 256)` bytes and drops the first partial line, so long debug lines no longer corrupt the tail output.
+
+**Config consistency**
+`corrupt_field_probability` fallback aligned to `0.05` (matching `config.ini`); previously the code fallback was `0.20`.
+
+**Dead code removed**
+Unused `import os` and the unused `ws_clients` list removed from `newgreedy_web.py`.
+
+### Engine fixes (`newgreedy_addon.py`)
+
+**Global ratio cap — correct ordering fix**
+The cap guard now checks `(tc["ul"] + delta_ul) / tc["dl"]` before accumulating, then recomputes the allowed delta and updates `tc["ul"]` with the corrected value. Previously, `delta_ul` was added unconditionally first, so the cap was detected one announce too late and the tracker cumul remained inflated.
+
+**`_tracker_cumul` persistence across restarts**
+The per-domain UL/DL counters are now saved to `stats.json` under the key `_tracker_cumul` and reloaded on startup (schema v4). Before this fix, the global ratio guard was blind to all announces that happened before the last restart.
+
+**`[TARGET_REACHED]` short-circuit in `_calc_upload`**
+Once the target ratio is reached, `_calc_upload` now returns immediately before any stagnation logic runs. This eliminates the spurious `[STAG][STALL_ALGO][TARGET_REACHED]` flag combinations visible in logs.
+
+**Timer-based `_save_stats` flush**
+Stats are now flushed at most once every 60 seconds (configurable via `_flush_interval`). A `threading.Lock` protects the write. Forced flushes still happen on `event=stopped` and `done()`. Under 20 active torrents at 250 announces/hour, this reduces disk writes from ~50/hour to ~1/hour.
+
+**Tracker backoff with exponential delay**
+After `TRACKER_BACKOFF_THRESHOLD` (3) consecutive HTTP 5xx errors from a tracker domain, NewGreedy stops forwarding announces to that domain and enters exponential backoff (300s × 2^N, capped at 1800s). Recovery is automatic on first successful response. Logs `[TRACKER_DOWN]` on entry and `[TRACKER_UP]` on recovery.
+
+**`[GLOBAL_CAP]` log line**
+When the global ratio guard triggers, a `[GLOBAL_CAP] domain | tracker_ratio capped → UL adjusted to X.XM` line is emitted for diagnostics.
+
+### API fixes and additions (`newgreedy_web.py`)
+
+**Purge by inactivity** — removed the erroneous `last_announce_ts > 0` check: entries with no timestamp are now correctly included when `inactive_hours` is set.
+
+**CSV ratio** — fixed double division by 1e6 (ratio is now `ul / dl`, both already in MB).
+
+**`/api/config` target_ratio** — dashboard and torrents pages now read `c.spoofing.target_ratio` correctly from the nested config structure.
+
+**Purge `keep_active=false`** — added `isinstance(v, dict)` guard before deletion.
+
+**`DELETE /api/stats/{ih}`** — delete a single torrent entry by 8-char hash prefix.
+
+**`GET /api/stats/purge`** — dry-run preview returning count and hash list without modifying data.
+
+**`GET /api/tracker_stats`** — new endpoint exposing per-domain UL/DL cumul, ratio, and percentage of the configured cap.
+
+**`/api/logs` bounds** — `lines` parameter validated `ge=10, le=2000` via FastAPI `Query`.
+
+**Stats cache** — `_load_stats()` now caches results for 2 seconds (TTL) to avoid repeated disk reads under concurrent API polling. Cache is invalidated on purge and single-delete operations.
+
+### Web UI additions
+
+**Dashboard** — warning banner appears automatically when any tracker domain exceeds 80% of `max_global_ratio_per_tracker`. Fetches `/api/tracker_stats` on each refresh cycle.
+
+**Torrents** — added `Last seen` column showing time since last announce in human-readable format (`Xs ago`, `Xm ago`, `Xh ago`, `Xd ago`).
+
+**Logs** — three level-filter buttons (`All` / `Warn` / `Error`) narrow the log view without clearing history. Log analysis section gains two new counters: `GLOBAL_CAP` events and `TRACKER_DOWN` events. A live tracker ratio bar fetches `/api/tracker_stats` and renders a progress bar per domain coloured green / amber / red based on cap proximity.
 
 ---
 
@@ -113,7 +187,6 @@ The installer:
 
 ```bash
 systemctl status newgreedy
-# open the web UI
 xdg-open http://localhost:8080
 ```
 
@@ -138,7 +211,7 @@ sudo ./uninstall.sh
 systemctl start newgreedy
 systemctl stop newgreedy
 systemctl restart newgreedy
-journalctl -u newgreedy -f       # live logs
+journalctl -u newgreedy -f
 ```
 
 ---
@@ -166,7 +239,7 @@ Open `http://localhost:8080` in your browser. The proxy listens on `127.0.0.1:34
 
 **4. Trust the CA in Firefox** (if used)
 
-Firefox → Settings → Privacy & Security → Certificates → Import  
+Firefox → Settings → Privacy & Security → Certificates → Import
 File: `%USERPROFILE%\.mitmproxy\mitmproxy-ca-cert.p12`
 
 **Update:**
@@ -179,16 +252,11 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -Update
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall
 ```
 
-Files: `%LOCALAPPDATA%\NewGreedy\`  
-Config: `%LOCALAPPDATA%\NewGreedy\config.ini`
-
 ---
 
 ### Docker
 
 **1. Create the required data files**
-
-Docker volumes fail silently if the host file doesn't exist. Create them first:
 
 ```bash
 touch stats.json torrent_registry.json newgreedy.log
@@ -220,8 +288,6 @@ docker compose pull
 docker compose up -d --build
 ```
 
-Data files (`config.ini`, `stats.json`, `static/`) are bind-mounted and survive container restarts.
-
 ---
 
 ### Manual (no installer)
@@ -232,16 +298,6 @@ cd NewGreedy
 pip install -r requirements.txt
 python3 newgreedy.py
 ```
-
-To generate and trust the CA manually:
-```bash
-python3 -c "
-import os
-from mitmproxy.certs import CertStore
-CertStore.from_store(os.path.expanduser('~/.mitmproxy'), 'mitmproxy')
-"
-```
-Then import `~/.mitmproxy/mitmproxy-ca-cert.pem` into your system or browser trust store.
 
 ---
 
@@ -259,26 +315,22 @@ Settings → Connection → Proxy Server:
 | Use proxy for tracker communication | ✅ enabled |
 | Use proxy for peer connections | ❌ disabled |
 
-Only enable the proxy for **tracker communication**. Enabling it for peer connections routes actual transfer traffic through NewGreedy unnecessarily.
-
 ### Deluge / Transmission / Other clients
 
-Set HTTP proxy `127.0.0.1:3456` in the network/proxy settings. The option is usually labelled "Tracker proxy" or "Announce proxy".
+Set HTTP proxy `127.0.0.1:3456` in the network/proxy settings.
 
 ---
 
 ## Configuration reference
 
-Config file location:
-
-| Platform | Path |
+| Platform | Config path |
 |---|---|
 | Linux / macOS | `/opt/newgreedy/config.ini` |
 | Windows | `%LOCALAPPDATA%\NewGreedy\config.ini` |
 | Docker | `./config.ini` (bind-mounted) |
 | Manual | `config.ini` next to `newgreedy.py` |
 
-Changes are applied live via the **Reload** button in the web UI Config page, or by sending `SIGHUP` to the process. A full restart is only needed for `listen_port` and `web_port`.
+Changes are applied live via **Reload config.ini** in the Config page, or `SIGHUP`. A full restart is only needed for `listen_port` and `web_port`.
 
 ---
 
@@ -286,7 +338,7 @@ Changes are applied live via the **Reload** button in the web UI Config page, or
 
 | Key | Default | Description |
 |---|---|---|
-| `listen_port` | `3456` | Port NewGreedy listens on. Must match the proxy port set in your torrent client. |
+| `listen_port` | `3456` | Port NewGreedy listens on. Must match the proxy port in your torrent client. |
 | `tracker_timeout` | `5` | Seconds before a tracker request times out. |
 
 ---
@@ -296,18 +348,18 @@ Changes are applied live via the **Reload** button in the web UI Config page, or
 | Key | Default | Description |
 |---|---|---|
 | `upload_mode` | `ratio_based` | Engine mode. `ratio_based` is the only supported value. |
-| `target_ratio` | `1.60` | The UL/DL ratio to reach per torrent. The engine ramps up injection until this is met. |
-| `target_ratio_buffer` | `0.03` | Internal overshoot buffer. Effective target = `target_ratio + buffer` (e.g. `1.63`). Ensures the ratio never dips below the nominal target due to noise. |
-| `auto_stop_at_target` | `true` | Stop injecting extra upload once the target ratio is reached. Only real upload is reported after that. |
-| `catch_up_factor` | `0.22` | Aggressiveness of catch-up toward the target. Higher = faster ratio growth, less natural profile. Range: `0.05` (slow) – `0.50` (aggressive). |
-| `max_simulated_speed_mbps` | `10.0` | Hard cap on simulated upload speed in MB/s per announce interval. Prevents unrealistically large jumps. |
-| `max_ratio_per_torrent` | `3.0` | Maximum ratio for a single torrent, regardless of the target. |
-| `max_global_ratio_per_tracker` | `2.5` | Maximum aggregate UL/DL ratio across all torrents on one tracker domain. Prevents the global ratio from looking abnormal. |
-| `upload_noise_pct` | `3.0` | Percentage of Pareto-distributed noise applied to each upload increment. Makes reported speed look less uniform. |
-| `stagnation_probability` | `0.03` | Probability per announce that the engine deliberately skips injection (reports 0 delta). Mimics natural upload pauses. Disabled for the first `min_announces_before_stagnation` announces and when ratio progress is below 65%. |
-| `seed_credit_mb` | `5.0` | MB credited per announce for pure seeders (torrents with no download history). |
-| `seed_target_mb` | `500.0` | Total upload target for pure seeders, used to drive the progress bar in the web UI. |
-| `anti_clustering` | `true` | Adds jitter to announce timing to avoid perfectly regular intervals. |
+| `target_ratio` | `1.60` | UL/DL ratio to reach per torrent. |
+| `target_ratio_buffer` | `0.03` | Internal overshoot buffer. Effective target = `target_ratio + buffer`. |
+| `auto_stop_at_target` | `true` | Stop injecting once the target ratio is reached. |
+| `catch_up_factor` | `0.22` | Aggressiveness of catch-up. Range: `0.05` (slow) – `0.50` (aggressive). |
+| `max_simulated_speed_mbps` | `10.0` | Hard cap on simulated upload speed per announce interval. |
+| `max_ratio_per_torrent` | `3.0` | Maximum ratio per torrent regardless of target. |
+| `max_global_ratio_per_tracker` | `2.5` | Maximum aggregate UL/DL across all torrents on one tracker domain. Enforced before each announce, with overflow correction. |
+| `upload_noise_pct` | `3.0` | Pareto-distributed noise percentage on each upload increment. |
+| `stagnation_probability` | `0.03` | Per-announce probability of deliberately skipping injection. |
+| `seed_credit_mb` | `5.0` | MB credited per announce for pure seeders. |
+| `seed_target_mb` | `500.0` | Total upload target for pure seeders (progress bar reference). |
+| `anti_clustering` | `true` | Jitter on announce timing. |
 
 ---
 
@@ -315,18 +367,18 @@ Changes are applied live via the **Reload** button in the web UI Config page, or
 
 | Key | Default | Description |
 |---|---|---|
-| `user_agent_mode` | `random` | `random`: rotate User-Agent to match the spoofed `peer_id` client. `fixed`: always use `user_agent_value`. |
-| `user_agent_value` | `qBittorrent/4.6.8` | Static User-Agent string, used only when `user_agent_mode = fixed`. |
-| `spoof_user_agent` | `true` | Replace the HTTP `User-Agent` header to match the peer_id client. |
-| `spoof_peer_id` | `true` | Assign a stable but randomised `peer_id` per torrent per session. Rotates across qBittorrent, Transmission, Deluge, libtorrent. |
-| `spoof_peers` | `true` | Randomise the `numwant` field ±`peer_variance`% to avoid a fixed request pattern. |
-| `peer_variance` | `0.15` | Variance factor for `numwant` randomisation (15% = ±15% of the original value). |
-| `spoof_port` | `true` | Assign a stable random port per torrent, drawn from `port_range`. |
-| `port_range` | `6881-6999` | Range used for spoofed port selection. |
-| `spoof_headers` | `true` | Inject realistic `Accept` and `Accept-Language` HTTP headers. |
-| `intercept_scrape` | `true` | Silently drop scrape requests. Scrape responses can reveal real stats and contradict injected announces. |
-| `tracker_whitelist` | _(empty)_ | Comma-separated tracker domains to process. All others are passed through unchanged. Empty = process all. |
-| `tracker_blacklist` | _(empty)_ | Comma-separated tracker domains to skip entirely. Takes precedence over the whitelist. |
+| `user_agent_mode` | `random` | `random`: rotate UA to match peer_id client. `fixed`: always use `user_agent_value`. |
+| `user_agent_value` | `qBittorrent/4.6.8` | Static UA, used when `user_agent_mode = fixed`. |
+| `spoof_user_agent` | `true` | Replace `User-Agent` header to match peer_id client. |
+| `spoof_peer_id` | `true` | Assign a stable randomised `peer_id` per torrent per session. |
+| `spoof_peers` | `true` | Randomise `numwant` ±`peer_variance`%. |
+| `peer_variance` | `0.15` | Variance factor for `numwant` randomisation. |
+| `spoof_port` | `true` | Assign a stable random port per torrent from `port_range`. |
+| `port_range` | `6881-6999` | Range for spoofed port selection. |
+| `spoof_headers` | `true` | Inject realistic `Accept` and `Accept-Language` headers. |
+| `intercept_scrape` | `true` | Silently drop scrape requests. |
+| `tracker_whitelist` | _(empty)_ | Comma-separated domains to process. Empty = all. |
+| `tracker_blacklist` | _(empty)_ | Comma-separated domains to skip. Takes precedence over whitelist. |
 
 ---
 
@@ -334,7 +386,7 @@ Changes are applied live via the **Reload** button in the web UI Config page, or
 
 | Key | Default | Description |
 |---|---|---|
-| `ssl_verify_trackers` | `true` | Verify tracker SSL certificates. Set to `false` only for trackers with self-signed certificates. |
+| `ssl_verify_trackers` | `true` | Verify tracker SSL certificates. |
 
 ---
 
@@ -342,8 +394,8 @@ Changes are applied live via the **Reload** button in the web UI Config page, or
 
 | Key | Default | Description |
 |---|---|---|
-| `persist_stats` | `true` | Save torrent stats to `stats.json` every 5 announces. Stats survive restarts. Set to `false` to run in memory-only mode. |
-| `auto_purge_stopped` | `true` | When a torrent client sends `event=stopped`, immediately remove that torrent from in-memory stats and from `stats.json`. |
+| `persist_stats` | `true` | Save stats to `stats.json`. Flushed at most once per 60 s; forced on stop. |
+| `auto_purge_stopped` | `true` | Remove torrent from stats on `event=stopped`. |
 
 ---
 
@@ -351,8 +403,8 @@ Changes are applied live via the **Reload** button in the web UI Config page, or
 
 | Key | Default | Description |
 |---|---|---|
-| `web_enabled` | `true` | Enable the FastAPI web UI and REST API. Set to `false` to run in headless mode. |
-| `web_host` | `0.0.0.0` | Address the web server binds to. Use `127.0.0.1` to restrict access to localhost only. |
+| `web_enabled` | `true` | Enable the FastAPI web UI and REST API. |
+| `web_host` | `0.0.0.0` | Bind address for the web server. |
 | `web_port` | `8080` | Port for the web UI. |
 
 ---
@@ -361,28 +413,26 @@ Changes are applied live via the **Reload** button in the web UI Config page, or
 
 | Key | Default | Description |
 |---|---|---|
-| `inject_hours` | `0-23` | Active injection window in 24h format (`HH-HH`). Outside this window, the engine forces stagnation. Examples: `8-22` = daytime only, `0-23` = always active. Supports midnight wrap-around (`22-6`). |
-| `min_announce_interval` | `1800` | Minimum seconds enforced between announces for the same torrent. Prevents over-announcing by aggressive clients. |
-| `interval_jitter_pct` | `0.08` | ±Jitter applied to the announce interval as a fraction. `0.08` = ±8%, preventing perfectly regular timing. |
-| `stall_announce_threshold` | `8` | Consecutive announces with `downloaded = 0` before `[STALL_NET]` is flagged. |
-| `min_announces_before_stagnation` | `10` | Minimum announce count before stagnation can trigger. Prevents early stagnation on new torrents. |
-| `log_level` | `INFO` | Logging verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR`. |
-| `event_anomaly_probability` | `0.03` | Probability of injecting a fake `event=started` on a regular announce. |
-| `corrupt_field_probability` | `0.05` | Probability of adding a `corrupt=` field to mimic real client behaviour. |
+| `inject_hours` | `0-23` | Active injection window in 24h format. Supports wrap-around (`22-6`). |
+| `min_announce_interval` | `1800` | Minimum seconds between announces for the same torrent. |
+| `interval_jitter_pct` | `0.08` | ±Jitter on announce interval as a fraction. |
+| `stall_announce_threshold` | `8` | Consecutive zero-DL announces before `[STALL_NET]` is flagged. |
+| `min_announces_before_stagnation` | `10` | Minimum announces before stagnation can trigger. |
+| `log_level` | `INFO` | Verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR`. |
+| `event_anomaly_probability` | `0.03` | Probability of injecting a fake `event=started`. |
+| `corrupt_field_probability` | `0.05` | Probability of adding a `corrupt=` field. |
 
 ---
 
 ## Web UI
 
-Open **[http://localhost:8080](http://localhost:8080)** after starting NewGreedy.
-
 | Page | URL | Description |
 |---|---|---|
-| Dashboard | `/` | Summary cards, filter by mode, auto-refresh every 15 s |
-| Torrents | `/torrents` | Full table — Real DL, Real UL, Injected UL, Ratio, ETA, CSV export, purge |
-| Charts | `/charts` | Time-series UL and ratio per torrent (requires at least 5 announces) |
+| Dashboard | `/` | Summary cards, tracker cap warning banner, auto-refresh every 15 s |
+| Torrents | `/torrents` | Full table — Real DL, Real UL, Injected UL, Ratio, ETA, Last seen, purge |
+| Charts | `/charts` | Time-series UL and ratio per torrent |
 | Config | `/config` | Current `config.ini` values + `.torrent` import |
-| Logs | `/logs` | Live log stream via WebSocket, colour-coded |
+| Logs | `/logs` | Live log stream, level filters, tracker ratio bar, GLOBAL_CAP counter |
 | Help | `/help` | Log field reference, API docs, qBittorrent setup, update check |
 
 ---
@@ -391,16 +441,19 @@ Open **[http://localhost:8080](http://localhost:8080)** after starting NewGreedy
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/api/stats` | GET | All torrent stats: mode, Real UL, Injected UL, ratio, history |
-| `/api/stats/csv` | GET | Download stats as a CSV file |
+| `/api/stats` | GET | All torrent stats |
+| `/api/stats/csv` | GET | Export stats as CSV |
+| `/api/stats/purge` | GET | Dry-run preview — count and hashes that would be purged |
 | `/api/stats/purge` | DELETE | Purge torrents — params: `keep_active`, `inactive_hours` |
-| `/api/health` | GET | Lists stalled, anomalous, and target-reached torrents |
+| `/api/stats/{ih}` | DELETE | Delete a single torrent by 8-char hash prefix |
+| `/api/tracker_stats` | GET | Per-domain UL/DL cumul, ratio, and % of cap |
+| `/api/health` | GET | Stalled, anomalous, and target-reached torrents |
 | `/api/history` | GET | Time-series snapshots for all torrents |
-| `/api/history/{ih}` | GET | Time-series for one torrent (8-char hash prefix) |
+| `/api/history/{ih}` | GET | Time-series for one torrent |
 | `/api/config` | GET | Current `config.ini` as JSON |
 | `/api/config/reload` | POST | Reload `config.ini` without restarting |
 | `/api/version` | GET | Current version vs latest GitHub release |
-| `/api/upload` | POST | Upload a `.torrent` file to pre-register infohash + size |
+| `/api/upload` | POST | Upload a `.torrent` to pre-register infohash + size |
 | `/ws/logs` | WebSocket | Real-time log stream |
 
 **Purge parameters:**
@@ -408,10 +461,13 @@ Open **[http://localhost:8080](http://localhost:8080)** after starting NewGreedy
 | Parameter | Type | Default | Effect |
 |---|---|---|---|
 | `keep_active` | bool | `true` | Preserve torrents that announced recently |
-| `inactive_hours` | int | `0` | Also purge torrents with no announce in the last N hours. Entries without a timestamp (pre-v1.7) are always purged when this is set. |
+| `inactive_hours` | int | `0` | Purge torrents with no announce in the last N hours. Entries without a timestamp are included. |
 
 ```
-DELETE /api/stats/purge?keep_active=true&inactive_hours=12
+GET    /api/stats/purge?keep_active=true&inactive_hours=12   # preview
+DELETE /api/stats/purge?keep_active=true&inactive_hours=12   # execute
+DELETE /api/stats/a1b2c3d4                                   # single torrent
+GET    /api/tracker_stats                                     # per-domain ratio
 ```
 
 ---
@@ -422,25 +478,30 @@ DELETE /api/stats/purge?keep_active=true&inactive_hours=12
 [DOWN] 99887766 | DL:  800.0M UL:  640.0M +  44.1M R:0.80 ETA:~12a #8
 [DOWN] 99887766 | DL:  800.0M UL:  640.0M +   0.0M R:0.80 ETA:~12a #9 [STAG]
 [SEED] abcdef12 | UL:  312.4M +  18.2M #23
-[SEED] abcdef12 | UL:  312.4M +   0.0M #24 [STALL_NET]
 [DOWN] 11223344 | DL: 1200.0M UL: 1960.0M +   0.1M R:1.63 ETA:~0a #41 [TARGET_REACHED]
+[GLOBAL_CAP] tracker.opentrackr.org | tracker_ratio capped → UL adjusted to 1280.0M
+[TRACKER_DOWN] tracker.openbittorrent.com — 3 consecutive errors, entering backoff
+[TRACKER_UP] tracker.openbittorrent.com — recovered
 ```
 
-| Field | Meaning |
+| Field / Flag | Meaning |
 |---|---|
-| `[DOWN]` / `[SEED]` | Mode: downloading, or seeding with no download history |
-| `DL` | Cumulative downloaded as reported by the client |
+| `[DOWN]` / `[SEED]` | Mode: downloading or pure seeder |
+| `DL` | Cumulative downloaded reported by the client |
 | `UL` | Cumulative injected upload sent to the tracker |
-| `+N` | Upload delta added this announce (0 during stagnation) |
+| `+N` | Upload delta this announce (0 during stagnation) |
 | `R` | Current ratio — UL / DL |
-| `ETA:~Na` | Estimated announces remaining to reach `target_ratio` |
+| `ETA:~Na` | Estimated announces to reach `target_ratio` |
 | `#N` | Total announce count for this torrent |
-| `[STAG]` | Deliberate stagnation — upload delta set to 0 this cycle |
-| `[STALL_NET]` | N consecutive announces with `downloaded = 0` from the client |
+| `[STAG]` | Deliberate stagnation — delta set to 0 |
+| `[STALL_NET]` | N consecutive zero-DL announces |
 | `[STALL_ALGO]` | Engine stagnation active |
 | `[TARGET_REACHED]` | Target ratio achieved — injection stopped |
-| `[PURGED]` | Torrent removed from stats (event=stopped or manual purge) |
-| `[AUTO-PURGE]` | Torrent removed automatically after 12 h of no announce |
+| `[PURGED]` | Removed after `event=stopped` or manual purge |
+| `[AUTO-PURGE]` | Removed automatically after 12 h of no announce |
+| `[GLOBAL_CAP]` | Global tracker ratio guard triggered — UL reduced |
+| `[TRACKER_DOWN]` | Tracker entering exponential backoff after repeated 5xx errors |
+| `[TRACKER_UP]` | Tracker recovered — announces resume |
 
 ---
 
@@ -448,15 +509,16 @@ DELETE /api/stats/purge?keep_active=true&inactive_hours=12
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| Ratio not increasing | 0 leechers on tracker (swarm-aware block) | Wait for leechers; check Charts page for history |
-| `[STALL_NET]` on all torrents | Client reports 0 download consistently | Normal for pure seeders — lower `stall_announce_threshold` if needed |
-| Injection only during certain hours | `inject_hours` restricts the window | Set `inject_hours = 0-23` for always-on |
-| HTTPS announces not intercepted | mitmproxy CA not trusted | Re-run installer, or import CA manually (see Installation) |
+| Ratio on tracker exceeds `max_global_ratio` | Pre-v1.7.5: cap was computed after accumulation | Upgrade to v1.7.5 — fixed by correct ordering |
+| Ratio cap resets after restart | Pre-v1.7.5: `_tracker_cumul` not persisted | Upgrade to v1.7.5 — now saved in `stats.json` |
+| `[STAG][STALL_ALGO][TARGET_REACHED]` together | Pre-v1.7.5: stagnation ran after target check | Upgrade to v1.7.5 — `_calc_upload` short-circuits on target |
+| `[TRACKER_DOWN]` in logs, announces skipped | Tracker returning 5xx — backoff active | Wait for automatic recovery; check tracker status |
+| Purge by inactivity does nothing | Entries have no timestamp | Use `GET /api/stats/purge?inactive_hours=12` to preview first |
+| Ratio not increasing | 0 leechers (swarm-aware block) | Wait for leechers; check Charts for history |
+| `[STALL_NET]` on all torrents | Client reports 0 download consistently | Normal for pure seeders — lower `stall_announce_threshold` |
+| HTTPS announces not intercepted | mitmproxy CA not trusted | Re-run installer or import CA manually |
 | Web UI not loading | Missing dependencies | `pip install fastapi uvicorn python-multipart` |
-| `mitmproxy` not found | Dependency not installed | `pip install mitmproxy` |
-| Config changes not applied | Service not reloaded | Click **Reload config.ini** in Config page, or `systemctl restart newgreedy` |
-| Torrents still listed after purge | Entries without timestamp (pre-v1.7 stats) | Use **Purge inactive 12h** button — old entries are cleared |
-| Service crashes at startup | Inline comments in old config not parsed | Fixed in v1.7 — delete `stats.json` and restart if upgrading from v1.6 |
+| Config changes not applied | Service not reloaded | Click **Reload config.ini** or `systemctl restart newgreedy` |
 
 ---
 
@@ -464,14 +526,14 @@ DELETE /api/stats/purge?keep_active=true&inactive_hours=12
 
 | File | Role |
 |---|---|
-| `newgreedy.py` | Launcher — starts the watchdog, update check thread, and web UI thread |
-| `newgreedy_addon.py` | mitmproxy addon — intercepts announces, runs the ratio engine, writes stats |
-| `newgreedy_web.py` | FastAPI application — serves the web UI and REST API |
+| `newgreedy.py` | Launcher — watchdog, update check, web UI thread |
+| `newgreedy_addon.py` | mitmproxy addon — intercepts announces, ratio engine, stats, backoff |
+| `newgreedy_web.py` | FastAPI app — web UI and REST API |
 | `config.ini` | Main configuration file |
-| `stats.json` | Persisted torrent stats (schema v3) — created on first announce |
-| `torrent_registry.json` | Stores infohash + size from `.torrent` imports |
-| `newgreedy.log` | Log file (also streamed live in the Logs page) |
-| `static/` | Web UI assets (HTML, CSS, JS) |
+| `stats.json` | Persisted stats (schema v4) — includes `_tracker_cumul` |
+| `torrent_registry.json` | Infohash + size from `.torrent` imports |
+| `newgreedy.log` | Log file (streamed live in Logs page) |
+| `static/` | Web UI assets |
 | `install.sh` | Installer — Linux / macOS |
 | `install.ps1` | Installer — Windows |
 | `uninstall.sh` | Uninstaller — Linux / macOS |
@@ -483,11 +545,15 @@ DELETE /api/stats/purge?keep_active=true&inactive_hours=12
 
 ## Changelog
 
+### v1.7.5
+Front-end CSS/JS deduplication (single style.css + app.js, −62% HTML, UI unchanged). Robustness pass (code review): FastAPI routing order fix (purge reachable again), race condition in _save_stats resolved via dict snapshots, anchored hash regex, unified stats cache (single disk read), registry cached at startup, inject_hours validation with warning, _tail_log mid-line truncation fix, corrupt_field_probability fallback aligned to 0.05, dead code (os import, ws_clients) removed.
+Global ratio cap ordering fix (ratio no longer exceeds `max_global_ratio_per_tracker`), `_tracker_cumul` persistence across restarts (schema v4), `[TARGET_REACHED]` short-circuit eliminates spurious `[STAG][STALL_ALGO]` co-occurrence, timer-based flush (60 s, thread-safe), tracker backoff with exponential delay and `[TRACKER_DOWN]`/`[TRACKER_UP]` logging, `[GLOBAL_CAP]` diagnostic log line, `GET /api/tracker_stats` endpoint, stats cache (2 s TTL), `DELETE /api/stats/{ih}`, `GET /api/stats/purge` dry-run, `/api/logs` bounds validation, dashboard tracker cap warning banner, Torrents `Last seen` column, Logs level filters and tracker ratio bar.
+
 ### v1.7.0
 Ratio history charts, `inject_hours` scheduler, `.torrent` import, dark/light theme, Real UL vs Injected UL columns, auto-purge inactive after 12 h, explicit mode field in stats, `configparser` inline comment fix, full English web UI.
 
 ### v1.6.5
-Fixed `STALL_ALGO` blocking at ~40%. Fixed `STALL_NET` false positives on pure seeders. Added update check at boot, watchdog, CSV export, status filters, Help page, swarm-aware injection, auto-stop at target, Pareto noise, stats schema v2.
+Fixed `STALL_ALGO` blocking at ~40%. Fixed `STALL_NET` false positives. Added update check, watchdog, CSV export, status filters, Help page, swarm-aware injection, auto-stop at target, Pareto noise, stats schema v2.
 
 ### v1.5 – v1.6
 Web UI introduced (dashboard, torrents, charts, config, logs). Announce interval jitter, corrupt field injection, smart stagnation, target ratio buffer, progress bars.

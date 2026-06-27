@@ -95,4 +95,4 @@ textarea{resize:vertical;min-height:80px}
 .ic{background:var(--bg3);border:1px solid var(--bd);border-radius:3px;padding:1px 5px;font-family:var(--mono);font-size:12px}
 @media(max-width:640px){nav{gap:6px;padding:0 12px}.nav-links a{padding:5px 6px;font-size:12px}main{padding:12px}.cards{grid-template-columns:1fr 1fr}}
 
-/* NewGreedy v1.7 — single stylesheet */
+/* NewGreedy v1.7.5 — single shared stylesheet */

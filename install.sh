@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -e
-VERSION="v1.7.0"
+VERSION="v1.7.5"
 UPDATE=false
 for arg in "$@"; do [ "$arg" = "--update" ] && UPDATE=true; done
 
@@ -10,7 +10,7 @@ CERT_DIR=/usr/local/share/ca-certificates
 
 echo "[NewGreedy $VERSION] Starting install (update=$UPDATE)..."
 
-python3 -m pip install -q -r requirements.txt
+python3 -m pip install -q --break-system-packages -r requirements.txt
 echo "[NewGreedy] Dependencies installed."
 
 mkdir -p $DEST/static

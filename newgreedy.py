@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""NewGreedy v1.7.0 — launcher"""
+"""NewGreedy v1.7.5 — launcher"""
 import configparser, logging, os, signal, sys, threading, time, urllib.request, json
 from pathlib import Path
 
-VERSION = "v1.7.0"
+VERSION = "v1.7.5"
 GITHUB_REPO = "Mrt0t0/NewGreedy"
 
 _BASE = Path(__file__).parent.resolve()
