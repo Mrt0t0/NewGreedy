@@ -1,7 +1,7 @@
 FROM python:3.11-slim
 
 LABEL maintainer="Mrt0t0"
-LABEL version="v1.7.0"
+LABEL version="v1.7.5"
 LABEL description="BitTorrent announce proxy — Upload ratio spoofer"
 
 WORKDIR /app
