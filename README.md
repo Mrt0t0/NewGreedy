@@ -55,97 +55,6 @@ Injection stops automatically when `target_ratio` is reached (`auto_stop_at_targ
 
 ---
 
-## v1.7.5 — Full changelog
-
-### Front-end refactor (CSS / JS deduplication)
-
-**Single shared stylesheet**
-The 96-line CSS block that was duplicated inline in all six HTML pages is now served once from `static/style.css` via `<link rel="stylesheet" href="/static/style.css">`. The CSS is byte-for-byte identical to the previous inline block — the UI appearance is unchanged.
-
-**Single shared script**
-The common front-end helpers (`fB`, `fR`, `fE`, `fAge`, `getMode`, `stag`, `modeTxt`, `rbar`, `ratioNum`, `initUI`) that were copy-pasted into every page are now defined once in `static/app.js` and loaded via `<script src="/static/app.js">`. Each page keeps only its page-specific logic.
-
-**Result:** total HTML payload reduced from ~91 KB to ~34 KB (−62%). Editing a shared style or helper now touches one file instead of six.
-
-### Robustness fixes (code review pass)
-
-**FastAPI routing order — `purge` vs `{ih}`**
-`DELETE /api/stats/purge` is now declared before `DELETE /api/stats/{ih}`. Previously the dynamic route captured `purge` as a hash and returned `not found`, making the purge endpoint unreachable.
-
-**Race condition in `_save_stats`**
-The flush thread now iterates over `dict(self._stats)` and `dict(self._tracker_cumul)` snapshots instead of the live dicts, preventing `RuntimeError: dictionary changed size during iteration` when an announce arrives mid-flush.
-
-**Anchored hash regex**
-`_load_stats` validation regex changed from `[0-9a-f]{6,40}` to `^[0-9a-f]{6,40}$` so partial or malformed keys can no longer match.
-
-**Unified stats cache**
-`_load_stats` and `_load_tracker_cumul` now share a single cached file read (`_read_stats_file`, 2 s TTL). `/api/tracker_stats` no longer triggers a second disk read per poll.
-
-**Registry cached at startup**
-`torrent_registry.json` is loaded once into `self._registry` instead of being re-read on every new torrent in the announce hot path.
-
-**`inject_hours` validation**
-Out-of-range or malformed `inject_hours` values now log a warning and fall back to `0-23` instead of silently disabling injection all day.
-
-**`_tail_log` no longer truncates mid-line**
-Reads `max(32768, n * 256)` bytes and drops the first partial line, so long debug lines no longer corrupt the tail output.
-
-**Config consistency**
-`corrupt_field_probability` fallback aligned to `0.05` (matching `config.ini`); previously the code fallback was `0.20`.
-
-**Dead code removed**
-Unused `import os` and the unused `ws_clients` list removed from `newgreedy_web.py`.
-
-### Engine fixes (`newgreedy_addon.py`)
-
-**Global ratio cap — correct ordering fix**
-The cap guard now checks `(tc["ul"] + delta_ul) / tc["dl"]` before accumulating, then recomputes the allowed delta and updates `tc["ul"]` with the corrected value. Previously, `delta_ul` was added unconditionally first, so the cap was detected one announce too late and the tracker cumul remained inflated.
-
-**`_tracker_cumul` persistence across restarts**
-The per-domain UL/DL counters are now saved to `stats.json` under the key `_tracker_cumul` and reloaded on startup (schema v4). Before this fix, the global ratio guard was blind to all announces that happened before the last restart.
-
-**`[TARGET_REACHED]` short-circuit in `_calc_upload`**
-Once the target ratio is reached, `_calc_upload` now returns immediately before any stagnation logic runs. This eliminates the spurious `[STAG][STALL_ALGO][TARGET_REACHED]` flag combinations visible in logs.
-
-**Timer-based `_save_stats` flush**
-Stats are now flushed at most once every 60 seconds (configurable via `_flush_interval`). A `threading.Lock` protects the write. Forced flushes still happen on `event=stopped` and `done()`. Under 20 active torrents at 250 announces/hour, this reduces disk writes from ~50/hour to ~1/hour.
-
-**Tracker backoff with exponential delay**
-After `TRACKER_BACKOFF_THRESHOLD` (3) consecutive HTTP 5xx errors from a tracker domain, NewGreedy stops forwarding announces to that domain and enters exponential backoff (300s × 2^N, capped at 1800s). Recovery is automatic on first successful response. Logs `[TRACKER_DOWN]` on entry and `[TRACKER_UP]` on recovery.
-
-**`[GLOBAL_CAP]` log line**
-When the global ratio guard triggers, a `[GLOBAL_CAP] domain | tracker_ratio capped → UL adjusted to X.XM` line is emitted for diagnostics.
-
-### API fixes and additions (`newgreedy_web.py`)
-
-**Purge by inactivity** — removed the erroneous `last_announce_ts > 0` check: entries with no timestamp are now correctly included when `inactive_hours` is set.
-
-**CSV ratio** — fixed double division by 1e6 (ratio is now `ul / dl`, both already in MB).
-
-**`/api/config` target_ratio** — dashboard and torrents pages now read `c.spoofing.target_ratio` correctly from the nested config structure.
-
-**Purge `keep_active=false`** — added `isinstance(v, dict)` guard before deletion.
-
-**`DELETE /api/stats/{ih}`** — delete a single torrent entry by 8-char hash prefix.
-
-**`GET /api/stats/purge`** — dry-run preview returning count and hash list without modifying data.
-
-**`GET /api/tracker_stats`** — new endpoint exposing per-domain UL/DL cumul, ratio, and percentage of the configured cap.
-
-**`/api/logs` bounds** — `lines` parameter validated `ge=10, le=2000` via FastAPI `Query`.
-
-**Stats cache** — `_load_stats()` now caches results for 2 seconds (TTL) to avoid repeated disk reads under concurrent API polling. Cache is invalidated on purge and single-delete operations.
-
-### Web UI additions
-
-**Dashboard** — warning banner appears automatically when any tracker domain exceeds 80% of `max_global_ratio_per_tracker`. Fetches `/api/tracker_stats` on each refresh cycle.
-
-**Torrents** — added `Last seen` column showing time since last announce in human-readable format (`Xs ago`, `Xm ago`, `Xh ago`, `Xd ago`).
-
-**Logs** — three level-filter buttons (`All` / `Warn` / `Error`) narrow the log view without clearing history. Log analysis section gains two new counters: `GLOBAL_CAP` events and `TRACKER_DOWN` events. A live tracker ratio bar fetches `/api/tracker_stats` and renders a progress bar per domain coloured green / amber / red based on cap proximity.
-
----
-
 ## Requirements
 
 | Dependency | Version |
@@ -546,20 +455,30 @@ GET    /api/tracker_stats                                     # per-domain ratio
 ## Changelog
 
 ### v1.7.5
-Front-end CSS/JS deduplication (single style.css + app.js, −62% HTML, UI unchanged). Robustness pass (code review): FastAPI routing order fix (purge reachable again), race condition in _save_stats resolved via dict snapshots, anchored hash regex, unified stats cache (single disk read), registry cached at startup, inject_hours validation with warning, _tail_log mid-line truncation fix, corrupt_field_probability fallback aligned to 0.05, dead code (os import, ws_clients) removed.
-Global ratio cap ordering fix (ratio no longer exceeds `max_global_ratio_per_tracker`), `_tracker_cumul` persistence across restarts (schema v4), `[TARGET_REACHED]` short-circuit eliminates spurious `[STAG][STALL_ALGO]` co-occurrence, timer-based flush (60 s, thread-safe), tracker backoff with exponential delay and `[TRACKER_DOWN]`/`[TRACKER_UP]` logging, `[GLOBAL_CAP]` diagnostic log line, `GET /api/tracker_stats` endpoint, stats cache (2 s TTL), `DELETE /api/stats/{ih}`, `GET /api/stats/purge` dry-run, `/api/logs` bounds validation, dashboard tracker cap warning banner, Torrents `Last seen` column, Logs level filters and tracker ratio bar.
+- **Bug fixes** — global ratio cap no longer exceeded, `_tracker_cumul` persisted across restarts, `[TARGET_REACHED]` short-circuits stagnation logic, purge by inactivity fixed, CSV ratio calculation corrected
+- **New endpoints** — `GET /api/tracker_stats`, `GET /api/stats/purge` dry-run, `DELETE /api/stats/{ih}`
+- **Tracker backoff** — exponential backoff after repeated 5xx errors, `[TRACKER_DOWN]` / `[TRACKER_UP]` logs
+- **Web UI** — dashboard tracker cap warning, Torrents "Last seen" column, Logs level filters, live tracker ratio bar
+- **Performance** — timer-based stats flush (60 s), 2 s API cache, registry cached at startup
+- **Code quality** — CSS/JS deduplicated into shared `style.css` + `app.js` (−62% HTML), FastAPI routing order fixed, race condition in save thread resolved, dead code removed
 
 ### v1.7.0
-Ratio history charts, `inject_hours` scheduler, `.torrent` import, dark/light theme, Real UL vs Injected UL columns, auto-purge inactive after 12 h, explicit mode field in stats, `configparser` inline comment fix, full English web UI.
+- Ratio history charts, `inject_hours` active window, `.torrent` file import
+- Dark / light theme toggle, Real UL vs Injected UL columns
+- Auto-purge after 12 h inactivity, full English web UI
 
 ### v1.6.5
-Fixed `STALL_ALGO` blocking at ~40%. Fixed `STALL_NET` false positives. Added update check, watchdog, CSV export, status filters, Help page, swarm-aware injection, auto-stop at target, Pareto noise, stats schema v2.
+- Fixed `STALL_ALGO` blocking at ~40%, fixed `STALL_NET` false positives on pure seeders
+- Added swarm-aware injection, auto-stop at target ratio, Pareto noise, CSV export
 
 ### v1.5 – v1.6
-Web UI introduced (dashboard, torrents, charts, config, logs). Announce interval jitter, corrupt field injection, smart stagnation, target ratio buffer, progress bars.
+- Web UI introduced (Dashboard, Torrents, Charts, Config, Logs)
+- Smart stagnation, announce jitter, target ratio buffer, progress bars
 
 ### v1.3 – v1.4
-Ratio-based upload engine, peer_id rotation, stats persistence, SIGHUP reload, seed credit, per-torrent cap, Windows installer, Docker support.
+- Ratio-based upload engine, `peer_id` rotation, stats persistence, seed credit
+- Windows installer, Docker support, per-torrent and global ratio caps
 
 ### v1.0 – v1.2
-Initial HTTP proxy. HTTPS interception via mitmproxy. Upload multiplier with noise and logistic progression.
+- Initial HTTP/HTTPS proxy via mitmproxy
+- Upload multiplier with noise and logistic progression
