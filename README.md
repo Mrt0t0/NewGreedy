@@ -387,9 +387,9 @@ GET    /api/tracker_stats                                     # per-domain ratio
 [DOWN] 99887766 | DL:  800.0M UL:  640.0M +   0.0M R:0.80 ETA:~12a #9 [STAG]
 [SEED] abcdef12 | UL:  312.4M +  18.2M #23
 [DOWN] 11223344 | DL: 1200.0M UL: 1960.0M +   0.1M R:1.63 ETA:~0a #41 [TARGET_REACHED]
-[GLOBAL_CAP] tracker.opentrackr.org | tracker_ratio capped → UL adjusted to 1280.0M
-[TRACKER_DOWN] tracker.openbittorrent.com — 3 consecutive errors, entering backoff
-[TRACKER_UP] tracker.openbittorrent.com — recovered
+[GLOBAL_CAP] tracker.AAABBBCCC.org | tracker_ratio capped → UL adjusted to 1280.0M
+[TRACKER_DOWN] tracker.AAABBBCCC.com — 3 consecutive errors, entering backoff
+[TRACKER_UP] tracker.AAABBBCCC.com — recovered
 ```
 
 | Field / Flag | Meaning |
