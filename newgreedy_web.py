@@ -12,10 +12,11 @@ app      = FastAPI(title="NewGreedy Web UI")
 _cfg     = None
 logger   = logging.getLogger("NewGreedy.Web")
 BASE_DIR = pathlib.Path(__file__).parent.resolve()
-STATS_FILE    = BASE_DIR / "stats.json"
-REGISTRY_FILE = BASE_DIR / "torrent_registry.json"
-LOG_FILE      = BASE_DIR / "newgreedy.log"
-STATIC_DIR    = BASE_DIR / "static"
+STATS_FILE         = BASE_DIR / "stats.json"
+PURGE_PENDING_FILE = BASE_DIR / "purge_pending.json"
+REGISTRY_FILE      = BASE_DIR / "torrent_registry.json"
+LOG_FILE           = BASE_DIR / "newgreedy.log"
+STATIC_DIR         = BASE_DIR / "static"
 
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -50,6 +51,17 @@ def _read_stats_file():
 def _invalidate_cache():
     global _raw_cache
     _raw_cache = None
+
+
+def _write_purge_pending(hashes: list):
+    try:
+        existing = []
+        if PURGE_PENDING_FILE.exists():
+            existing = json.loads(PURGE_PENDING_FILE.read_text())
+        merged = list(set(existing) | set(hashes))
+        PURGE_PENDING_FILE.write_text(json.dumps(merged))
+    except Exception as e:
+        logger.warning("purge_pending write error: %s", e)
 
 
 def _load_stats():
@@ -309,6 +321,7 @@ async def purge_stats(keep_active: bool = True, inactive_hours: int = 0):
             json.dump(data, f, indent=2)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+    _write_purge_pending(to_del)
     _invalidate_cache()
     after = len([k for k in data if VALID_HASH_RE.match(k)])
     return {"purged": before - after, "remaining": after, "keep_active": keep_active, "inactive_hours": inactive_hours}
@@ -332,6 +345,7 @@ async def delete_torrent_stat(ih: str):
             json.dump(data, f, indent=2)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+    _write_purge_pending([ih])
     _invalidate_cache()
     return {"deleted": ih}
 

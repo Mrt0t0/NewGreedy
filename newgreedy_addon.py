@@ -9,9 +9,10 @@ import pathlib
 VERSION       = "v1.7.5"
 SCHEMA_VER    = 4
 _BASE         = pathlib.Path(__file__).parent.resolve()
-LOG_FILE      = str(_BASE / "newgreedy.log")
-STATS_FILE    = str(_BASE / "stats.json")
-REGISTRY_FILE = str(_BASE / "torrent_registry.json")
+LOG_FILE           = str(_BASE / "newgreedy.log")
+STATS_FILE         = str(_BASE / "stats.json")
+PURGE_PENDING_FILE = str(_BASE / "purge_pending.json")
+REGISTRY_FILE      = str(_BASE / "torrent_registry.json")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -346,6 +347,20 @@ class NewGreedyAddon:
                     domain: {"ul": tc["ul"], "dl": tc["dl"]}
                     for domain, tc in dict(self._tracker_cumul).items()
                 }
+                pending = []
+                try:
+                    with open(PURGE_PENDING_FILE) as f:
+                        pending = json.load(f)
+                    for ih in pending:
+                        if ih in self._stats:
+                            del self._stats[ih]
+                            logger.info("[PURGE_SYNC] %s — removed from memory (web purge)", ih)
+                    import os as _os
+                    _os.remove(PURGE_PENDING_FILE)
+                except FileNotFoundError:
+                    pass
+                except Exception as e:
+                    logger.warning("purge_pending read error: %s", e)
                 purged = []
                 for ih, s in dict(self._stats).items():
                     if s._last_announce_ts > 0 and s._last_announce_ts < cutoff and s._ann_count >= 5:
