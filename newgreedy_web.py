@@ -39,7 +39,7 @@ def _read_stats_file():
     if _raw_cache is not None and (now - _raw_cache_ts) < _raw_cache_ttl:
         return _raw_cache
     try:
-        with open(STATS_FILE) as f:
+        with open(STATS_FILE, encoding="utf-8") as f:
             raw = json.load(f)
     except Exception:
         raw = {}
@@ -57,9 +57,9 @@ def _write_purge_pending(hashes: list):
     try:
         existing = []
         if PURGE_PENDING_FILE.exists():
-            existing = json.loads(PURGE_PENDING_FILE.read_text())
+            existing = json.loads(PURGE_PENDING_FILE.read_text(encoding="utf-8"))
         merged = list(set(existing) | set(hashes))
-        PURGE_PENDING_FILE.write_text(json.dumps(merged))
+        PURGE_PENDING_FILE.write_text(json.dumps(merged), encoding="utf-8")
     except Exception as e:
         logger.warning("purge_pending write error: %s", e)
 
@@ -101,7 +101,7 @@ def _tail_log(n=500):
 @app.get("/", response_class=HTMLResponse)
 async def index():
     f = STATIC_DIR / "index.html"
-    return f.read_text() if f.exists() else "<h1>NewGreedy v1.7.5</h1>"
+    return f.read_text(encoding="utf-8") if f.exists() else "<h1>NewGreedy v1.7.5</h1>"
 
 
 @app.get("/{page}", response_class=HTMLResponse)
@@ -112,7 +112,7 @@ async def serve_page(page: str):
     f = STATIC_DIR / f"{page}.html"
     if not f.exists():
         return HTMLResponse(status_code=404, content=f"{page}.html not found in static/")
-    return f.read_text()
+    return f.read_text(encoding="utf-8")
 
 
 @app.get("/api/stats")
@@ -259,12 +259,12 @@ async def api_upload_torrent(file: UploadFile = File(...)):
             return JSONResponse({"error": "Could not extract info_hash"}, status_code=400)
         ih_key = ih[:8]
         try:
-            with open(REGISTRY_FILE) as f:
+            with open(REGISTRY_FILE, encoding="utf-8") as f:
                 reg = json.load(f)
         except Exception:
             reg = {}
         reg[ih_key] = {"info_hash": ih, "size_bytes": size, "name": file.filename or ""}
-        with open(REGISTRY_FILE, "w") as f:
+        with open(REGISTRY_FILE, "w", encoding="utf-8") as f:
             json.dump(reg, f, indent=2)
         return {
             "info_hash":       ih,
@@ -281,7 +281,7 @@ async def api_upload_torrent(file: UploadFile = File(...)):
 @app.get("/api/stats/purge")
 async def purge_stats_preview(keep_active: bool = True, inactive_hours: int = 0):
     try:
-        with open(STATS_FILE) as f:
+        with open(STATS_FILE, encoding="utf-8") as f:
             data = json.load(f)
     except Exception:
         data = {}
@@ -300,7 +300,7 @@ async def purge_stats_preview(keep_active: bool = True, inactive_hours: int = 0)
 @app.delete("/api/stats/purge")
 async def purge_stats(keep_active: bool = True, inactive_hours: int = 0):
     try:
-        with open(STATS_FILE) as f:
+        with open(STATS_FILE, encoding="utf-8") as f:
             data = json.load(f)
     except Exception:
         data = {}
@@ -317,7 +317,7 @@ async def purge_stats(keep_active: bool = True, inactive_hours: int = 0):
     for k in to_del:
         del data[k]
     try:
-        with open(STATS_FILE, "w") as f:
+        with open(STATS_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -333,7 +333,7 @@ async def delete_torrent_stat(ih: str):
     if not VALID_HASH_RE.match(ih):
         return JSONResponse({"error": "invalid hash"}, status_code=400)
     try:
-        with open(STATS_FILE) as f:
+        with open(STATS_FILE, encoding="utf-8") as f:
             data = json.load(f)
     except Exception:
         data = {}
@@ -341,7 +341,7 @@ async def delete_torrent_stat(ih: str):
         return JSONResponse({"error": "not found"}, status_code=404)
     del data[ih]
     try:
-        with open(STATS_FILE, "w") as f:
+        with open(STATS_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)

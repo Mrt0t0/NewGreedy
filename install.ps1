@@ -1,4 +1,4 @@
-param([switch]$Update, [switch]$Uninstall)
+﻿﻿param([switch]$Update, [switch]$Uninstall)
 
 $Version  = "v1.7.5"
 $Dest     = "$env:LOCALAPPDATA\NewGreedy"
@@ -32,7 +32,7 @@ try {
 }
 
 Log "Installing Python dependencies..."
-python -m pip install -q -r requirements.txt
+python -m pip install -q --break-system-packages -r requirements.txt 2>$null; python -m pip install -q -r requirements.txt 2>$null
 Log "Dependencies installed."
 
 New-Item -ItemType Directory -Force -Path "$Dest\static" | Out-Null
@@ -47,7 +47,7 @@ if (-not $Update) {
     certutil -addstore -user Root $caPath 2>$null
     Log "CA certificate trusted in user store."
   } else {
-    Log "WARNING: CA cert not found — trust manually via mitmproxy docs."
+    Log "WARNING: CA cert not found - trust manually via mitmproxy docs."
   }
 }
 

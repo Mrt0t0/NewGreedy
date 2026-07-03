@@ -293,7 +293,7 @@ class NewGreedyAddon:
     def _load_stats(self):
         VALID = re.compile(r"^[0-9a-f]{6,40}$")
         try:
-            with open(STATS_FILE) as f:
+            with open(STATS_FILE, encoding="utf-8") as f:
                 raw = json.load(f)
             schema = raw.get("_schema_version", 1)
             tc_raw = raw.get("_tracker_cumul", {})
@@ -349,7 +349,7 @@ class NewGreedyAddon:
                 }
                 pending = []
                 try:
-                    with open(PURGE_PENDING_FILE) as f:
+                    with open(PURGE_PENDING_FILE, encoding="utf-8") as f:
                         pending = json.load(f)
                     for ih in pending:
                         if ih in self._stats:
@@ -382,7 +382,7 @@ class NewGreedyAddon:
                 for ih in purged:
                     del self._stats[ih]
                     logger.info("[AUTO-PURGE] %s — no announce for 12h+", ih)
-                with open(STATS_FILE, "w") as f:
+                with open(STATS_FILE, "w", encoding="utf-8") as f:
                     json.dump(data, f, indent=2)
                 self._last_flush_ts = now
             except Exception as e:
@@ -426,7 +426,7 @@ class NewGreedyAddon:
 
     def _load_registry(self):
         try:
-            with open(REGISTRY_FILE) as f:
+            with open(REGISTRY_FILE, encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
             return {}
