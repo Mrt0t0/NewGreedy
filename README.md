@@ -537,11 +537,8 @@ GET    /api/tracker_stats                                     # per-domain ratio
 | `uninstall.sh` | Uninstaller — Linux / macOS |
 | `requirements.txt` | Python dependencies |
 | `LICENSE` | GNU General Public License v3.0 |
-| `.gitignore` | Excludes runtime data (`stats.json`, logs, `.torrent` files) from Git |
 | `Dockerfile` | Docker image |
 | `docker-compose.yml` | Docker Compose stack |
-| `tests/` | pytest suite (ratio engine, caps, routing, sanitisation) |
-| `.github/workflows/` | GitHub Actions CI (lint, test, Docker build) |
 
 ---
 
