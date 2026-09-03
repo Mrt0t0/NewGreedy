@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>NewGreedy — Logs</title>
-<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/style.css?v=1.7.6">
 </head>
 <body>
 <nav>
@@ -44,7 +44,8 @@
     <select id="filterHash" style="width:140px;padding:4px 8px;font-size:12px">
       <option value="">— Hash —</option>
     </select>
-    <button class="btn" onclick="clearL()">✕ Clear</button>
+    <button class="btn" onclick="clearL()">✕ Clear view</button>
+    <button class="btn dan" onclick="purgeL()">🗑 Purge file</button>
     <button class="btn pri" onclick="dlLogs()">⬇ Download</button>
   </div>
   <div class="logarea" id="logarea"></div>
@@ -64,7 +65,17 @@
 </div>
 
 </main>
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=1.7.6"></script>
+<script>
+if (typeof ngUrl !== 'function') {
+  document.addEventListener('DOMContentLoaded', function () {
+    var d = document.createElement('div');
+    d.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:#f85149;color:#fff;padding:10px 14px;font:13px -apple-system,sans-serif;text-align:center';
+    d.innerHTML = 'static/app.js failed to load or is outdated. Force-reload the page (Ctrl+Shift+R / Cmd+Shift+R) or check that static/app.js is present on the server.';
+    document.body.insertBefore(d, document.body.firstChild);
+  });
+}
+</script>
 <script>
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -104,9 +115,12 @@ function updateStats(){
   document.getElementById('ls_cap').textContent=_lines.filter(l=>/GLOBAL_CAP/i.test(l)).length;
   document.getElementById('ls_td').textContent=_lines.filter(l=>/TRACKER_DOWN/i.test(l)).length;
   document.getElementById('ls_purge').textContent=_lines.filter(l=>/PURGED/i.test(l)).length;
-  fetch('/api/tracker_stats').then(r=>r.json()).then(tc=>{
+}
+
+function refreshTrackerBar(){
+  API.get('/api/tracker_stats').then(tc=>{
     var bar=document.getElementById('tracker_ratio_bar');
-    var entries=Object.entries(tc);
+    var entries=Object.entries(tc||{}).filter(e=>e[1]&&typeof e[1]==='object'&&'cap' in e[1]);
     if(!entries.length){bar.style.display='none';return;}
     bar.style.display='block';
     bar.innerHTML='<div class="sec-t" style="margin-bottom:8px">📡 Tracker ratio</div>'+
@@ -172,24 +186,31 @@ function rerender(){
 document.getElementById('filterHash').addEventListener('change',rerender);
 document.getElementById('showAll').addEventListener('change',rerender);
 
-function clearL(){document.getElementById('logarea').innerHTML='';_lines=[];}
+function clearL(){document.getElementById('logarea').innerHTML='';_lines=[];updateStats();}
+function purgeL(){
+  if(!confirm('Delete the contents of newgreedy.log on the server?')) return;
+  API.del('/api/logs').then(()=>{clearL();}).catch(e=>alert('Error: '+e.message));
+}
 function dlLogs(){
   var b=new Blob([_lines.join('\n')],{type:'text/plain'});
   var a=document.createElement('a');a.href=URL.createObjectURL(b);
   a.download='newgreedy-'+new Date().toISOString().slice(0,10)+'.log';a.click();
 }
 
+var _wsRetry=0;
 function connect(){
-  var proto=location.protocol==='https:'?'wss:':'ws:';
-  _ws=new WebSocket(proto+'//'+location.host+'/ws/logs');
+    _ws=new WebSocket(ngWsUrl('/ws/logs'));
   _ws.onopen=()=>{
+    _wsRetry=0;
     document.getElementById('wdot').className='wdot on';
     document.getElementById('wstatus').textContent='Connected';
   };
   _ws.onclose=()=>{
+    _wsRetry=Math.min(_wsRetry+1,10);
+    var delay=Math.min(3000*_wsRetry,30000);
     document.getElementById('wdot').className='wdot';
-    document.getElementById('wstatus').textContent='Disconnected — reconnecting…';
-    setTimeout(connect,3000);
+    document.getElementById('wstatus').textContent='Disconnected — retrying in '+(delay/1000)+'s';
+    setTimeout(connect,delay);
   };
   _ws.onerror=()=>{document.getElementById('wstatus').textContent='WS Error';};
   _ws.onmessage=e=>{
@@ -201,6 +222,8 @@ function connect(){
   };
 }
 connect();
+refreshTrackerBar();
+setInterval(refreshTrackerBar,20000);
 
 initUI('logs');
 </script>

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>NewGreedy — Torrents</title>
-<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/style.css?v=1.7.6">
 </head>
 <body>
 <nav>
@@ -55,15 +55,25 @@
   <table>
     <thead><tr>
       <th>Hash</th><th>Mode</th><th>Real DL</th><th>Real UL</th><th>Inj. UL</th><th>Ratio</th><th>Progress</th>
-      <th>ETA</th><th>Ann#</th><th>Last seen</th><th>Status</th>
+      <th>ETA</th><th>Ann#</th><th>Trackers</th><th>Last seen</th><th>Status</th>
     </tr></thead>
-    <tbody id="tbody"><tr><td colspan="11" style="text-align:center;padding:20px" class="muted">Loading…</td></tr></tbody>
+    <tbody id="tbody"><tr><td colspan="12" style="text-align:center;padding:20px" class="muted">Loading…</td></tr></tbody>
   </table>
 </div>
 <div class="ts" id="ts" style="margin-top:8px"></div>
 
 </main>
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=1.7.6"></script>
+<script>
+if (typeof ngUrl !== 'function') {
+  document.addEventListener('DOMContentLoaded', function () {
+    var d = document.createElement('div');
+    d.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:#f85149;color:#fff;padding:10px 14px;font:13px -apple-system,sans-serif;text-align:center';
+    d.innerHTML = 'static/app.js failed to load or is outdated. Force-reload the page (Ctrl+Shift+R / Cmd+Shift+R) or check that static/app.js is present on the server.';
+    document.body.insertBefore(d, document.body.firstChild);
+  });
+}
+</script>
 <script>
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -87,7 +97,7 @@ function render(){
   });
   var tb=document.getElementById('tbody');
   if(!rows.length){
-    tb.innerHTML='<tr><td colspan="11" style="text-align:center;padding:20px" class="muted">No data</td></tr>';
+    tb.innerHTML='<tr><td colspan="12" style="text-align:center;padding:20px" class="muted">No data</td></tr>';
     return;
   }
   tb.innerHTML=rows.map(([ih,d])=>{
@@ -96,7 +106,7 @@ function render(){
       ? Math.round(Math.max(0,d.cumul_rep_dl*_tgt-d.cumul_rep_ul)/(d.cumul_rep_ul/d.ann_count))
       : 0;
     return '<tr>'
-      +'<td class="mono"><a href="/charts?ih='+ih+'" style="color:var(--mu)">'+ih+'</a></td>'
+      +'<td class="mono"><a href="'+ngUrl('/charts?ih='+ih)+'" title="'+ih+'" style="color:var(--mu)">'+fName(d,ih)+'</a>'+(d.has_udp?' <span class="tag stall" title="This torrent uses UDP trackers which bypass NewGreedy">UDP</span>':'')+'</td>'
       +'<td>'+modeTxt(d)+'</td>'
       +'<td class="mono">'+(d.cumul_rep_dl>0?fB(d.cumul_rep_dl):'<span class="muted">—</span>')+'</td>'
       +'<td class="mono muted">'+fB(d.cumul_real_ul||0)+'</td>'
@@ -105,6 +115,7 @@ function render(){
       +'<td>'+rbar(r,_tgt)+'</td>'
       +'<td class="mono muted">'+fE(eta)+'</td>'
       +'<td class="mono muted">'+(d.ann_count||0)+'</td>'
+      +'<td class="mono muted">'+trkCell(d)+'</td>'
       +'<td class="mono muted">'+fAge(d.last_announce_ts)+'</td>'
       +'<td>'+stag(d)+'</td>'
       +'</tr>';
@@ -118,7 +129,7 @@ function sa(msg,type){
 function handleFiles(files){
   Array.from(files).forEach(f=>{
     var fd=new FormData(); fd.append('file',f);
-    fetch('/api/upload',{method:'POST',body:fd})
+    fetch(ngUrl('/api/upload'),{method:'POST',body:fd})
       .then(r=>r.json())
       .then(d=>sa('✓ '+f.name+' — ih:'+d.infohash+' size:'+fB(d.size_estimate),'ok'))
       .catch(e=>sa('✗ '+f.name+': '+e.message,'er'));
@@ -136,6 +147,17 @@ function purge(){
     .then(d=>{sa('Purged: '+JSON.stringify(d),'ok'); setTimeout(load,600);})
     .catch(e=>sa('Error: '+e.message,'er'));
 }
+function trkCell(d){
+  var t=d.trackers||{};
+  var names=Object.keys(t);
+  if(!names.length) return '—';
+  var tip=names.map(function(n){
+    var v=t[n]||{};
+    var r=(v.dl>0)?(v.ul/v.dl).toFixed(2):'—';
+    return n+'  UL '+fB(v.ul)+'  R '+r;
+  }).join('\n');
+  return '<span title="'+tip.replace(/"/g,'&quot;')+'">'+names.length+'</span>';
+}
 function load(){
   Promise.all([API.get('/api/stats'),API.get('/api/config')])
   .then(([s,c])=>{
@@ -145,7 +167,7 @@ function load(){
     render();
   })
   .catch(e=>{
-    document.getElementById('tbody').innerHTML='<tr><td colspan="11" style="text-align:center;padding:20px;color:var(--er)">API error: '+e.message+'</td></tr>';
+    document.getElementById('tbody').innerHTML='<tr><td colspan="12" style="text-align:center;padding:20px;color:var(--er)">API error: '+e.message+'</td></tr>';
   });
 }
 load(); setInterval(load,15000);

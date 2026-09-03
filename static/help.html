@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>NewGreedy — Help</title>
-<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/style.css?v=1.7.6">
 </head>
 <body>
 <nav>
@@ -34,6 +34,8 @@
       <div style="font-size:22px;font-weight:700;font-family:var(--mono);color:var(--ok)" id="vgit">—</div></div>
     <a id="vlink" href="#" target="_blank" class="btn pri" style="display:none">View release ↗</a>
   </div>
+  <div id="verr" class="muted" style="display:none;font-size:12px;margin-top:6px">
+  </div>
 </div>
 <div class="sec">
   <div class="sec-t">📋 Log fields</div>
@@ -52,6 +54,11 @@
       <tr><td class="mono">[STALL_ALGO]</td><td>Algorithm stagnation active</td></tr>
       <tr><td class="mono">[TARGET_REACHED]</td><td>Target ratio reached — injection stopped</td></tr>
       <tr><td class="mono">[PURGED]</td><td>Torrent removed from stats after event=stopped</td></tr>
+      <tr><td class="mono">[GLOBAL_CAP]</td><td>Global tracker ratio cap reached — upload reduced</td></tr>
+      <tr><td class="mono">[TRACKER_DOWN]</td><td>Tracker entering backoff after repeated 5xx errors</td></tr>
+      <tr><td class="mono">[UDP_BYPASS]</td><td>UDP tracker detected — announces are not intercepted</td></tr>
+      <tr><td class="mono">[WATCH]</td><td>Torrent auto-imported from the watch folder</td></tr>
+      <tr><td class="mono">[CUMUL_PURGE]</td><td>Inactive tracker dropped from the cumulative ratio</td></tr>
     </tbody>
   </table></div>
 </div>
@@ -69,6 +76,13 @@
       <tr><td class="mono">/api/config/reload</td><td class="muted">POST</td><td>Reload config without restart</td></tr>
       <tr><td class="mono">/api/version</td><td class="muted">GET</td><td>Local version vs GitHub</td></tr>
       <tr><td class="mono">/api/upload</td><td class="muted">POST</td><td>Upload .torrent</td></tr>
+      <tr><td class="mono">/api/tracker_stats</td><td class="muted">GET</td><td>Aggregate ratio per tracker domain</td></tr>
+      <tr><td class="mono">/api/udp_status</td><td class="muted">GET</td><td>UDP trackers detected (not intercepted)</td></tr>
+      <tr><td class="mono">/api/registry</td><td class="muted">GET</td><td>Imported torrents: name, size, trackers</td></tr>
+      <tr><td class="mono">/api/config/editable</td><td class="muted">GET</td><td>List of settings editable from the UI</td></tr>
+      <tr><td class="mono">/api/config/set</td><td class="muted">POST</td><td>Update one setting in config.ini</td></tr>
+      <tr><td class="mono">/api/stats/{ih}</td><td class="muted">DELETE</td><td>Delete a single torrent</td></tr>
+      <tr><td class="mono">/metrics</td><td class="muted">GET</td><td>Prometheus metrics</td></tr>
       <tr><td class="mono">/ws/logs</td><td class="muted">WS</td><td>Real-time log stream</td></tr>
     </tbody>
   </table></div>
@@ -85,23 +99,46 @@
 </div>
 
 </main>
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=1.7.6"></script>
+<script>
+if (typeof ngUrl !== 'function') {
+  document.addEventListener('DOMContentLoaded', function () {
+    var d = document.createElement('div');
+    d.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:#f85149;color:#fff;padding:10px 14px;font:13px -apple-system,sans-serif;text-align:center';
+    d.innerHTML = 'static/app.js failed to load or is outdated. Force-reload the page (Ctrl+Shift+R / Cmd+Shift+R) or check that static/app.js is present on the server.';
+    document.body.insertBefore(d, document.body.firstChild);
+  });
+}
+</script>
 <script>
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 
-fetch('/api/version').then(r=>r.json()).then(v=>{
+API.get('/api/version').then(v=>{
   document.getElementById('vlocal').textContent=v.current||'—';
-  document.getElementById('vgit').textContent=v.latest||'—';
-  if(v.update_available){
-    var l=document.getElementById('vlink');
-    l.href=v.url||'https://github.com/Mrt0t0/NewGreedy/releases';
-    l.style.display='inline-block';
-    document.getElementById('vgit').style.color='var(--wa)';
+  var g=document.getElementById('vgit');
+  if(v.latest){
+    g.textContent=v.latest;
+    g.style.color=v.update_available?'var(--wa)':'var(--ok)';
+    g.title=v.cached?'cached result':'';
+    if(v.update_available){
+      var l=document.getElementById('vlink');
+      l.href=v.url||'https://github.com/Mrt0t0/NewGreedy/releases';
+      l.style.display='inline-block';
+    }
+  }else{
+    g.textContent='unavailable';
+    g.style.color='var(--mu)';
+    g.style.fontSize='14px';
+    g.title=v.error||'';
+    var note=document.getElementById('verr');
+    if(note&&v.error){note.textContent=v.error;note.style.display='block';}
   }
-}).catch(()=>{
+}).catch(e=>{
   document.getElementById('vlocal').textContent='unavailable';
+  var note=document.getElementById('verr');
+  if(note){note.textContent='Could not reach the local API: '+e.message;note.style.display='block';}
 });
 
 initUI('help');

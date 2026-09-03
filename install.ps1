@@ -1,6 +1,6 @@
-﻿﻿param([switch]$Update, [switch]$Uninstall)
+﻿param([switch]$Update, [switch]$Uninstall)
 
-$Version  = "v1.7.5"
+$Version  = "v1.7.6"
 $Dest     = "$env:LOCALAPPDATA\NewGreedy"
 $TaskName = "NewGreedy"
 $LogFile  = "$Dest\install.log"
@@ -36,7 +36,25 @@ python -m pip install -q --break-system-packages -r requirements.txt 2>$null; py
 Log "Dependencies installed."
 
 New-Item -ItemType Directory -Force -Path "$Dest\static" | Out-Null
+New-Item -ItemType Directory -Force -Path "$Dest\torrents" | Out-Null
+
+$preserve = @("config.ini", "stats.json", "torrent_registry.json")
+$backup   = @{}
+if ($Update) {
+  foreach ($f in $preserve) {
+    $p = Join-Path $Dest $f
+    if (Test-Path $p) { $backup[$f] = Get-Content -Raw -Encoding UTF8 $p }
+  }
+}
+
 Copy-Item -Recurse -Force ".\*" $Dest
+
+if ($Update) {
+  foreach ($f in $backup.Keys) {
+    Set-Content -Path (Join-Path $Dest $f) -Value $backup[$f] -Encoding UTF8
+  }
+  Log "Existing config.ini and stats preserved."
+}
 Log "Files copied to $Dest"
 
 if (-not $Update) {
@@ -68,6 +86,9 @@ if (-not $Update) {
 }
 
 Log "Installation complete."
+Log "  Proxy  : 127.0.0.1:3456"
+Log "  Web UI : http://localhost:8080"
+Log "  Watch  : $Dest\torrents  (drop .torrent files here)"
 Log "  Proxy  : 127.0.0.1:3456"
 Log "  Web UI : http://localhost:8080"
 Write-Host ""

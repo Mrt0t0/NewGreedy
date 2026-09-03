@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>NewGreedy — Dashboard</title>
-<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/style.css?v=1.7.6">
 </head>
 <body>
 <nav>
@@ -34,6 +34,7 @@
   <div class="card"><div class="clbl">Total UL</div><div class="cval" id="c_ul">—</div></div>
   <div class="card"><div class="clbl">Total DL</div><div class="cval" id="c_dl">—</div></div>
 </div>
+<div id="udp_warn" style="display:none;margin-bottom:14px"></div>
 <div id="tracker_warn" style="display:none;margin-bottom:14px"></div>
 <div class="toolbar">
   <button class="btn active" onclick="setF('all',this)">All</button>
@@ -56,7 +57,17 @@
 <div class="ts" id="ts" style="margin-top:8px"></div>
 
 </main>
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=1.7.6"></script>
+<script>
+if (typeof ngUrl !== 'function') {
+  document.addEventListener('DOMContentLoaded', function () {
+    var d = document.createElement('div');
+    d.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:#f85149;color:#fff;padding:10px 14px;font:13px -apple-system,sans-serif;text-align:center';
+    d.innerHTML = 'static/app.js failed to load or is outdated. Force-reload the page (Ctrl+Shift+R / Cmd+Shift+R) or check that static/app.js is present on the server.';
+    document.body.insertBefore(d, document.body.firstChild);
+  });
+}
+</script>
 <script>
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -121,7 +132,18 @@ function load(){
   .catch(e=>{
     document.getElementById('tbody').innerHTML='<tr><td colspan="9" style="text-align:center;padding:20px;color:var(--er)">API error: '+e.message+'</td></tr>';
   });
-  fetch('/api/tracker_stats').then(r=>r.json()).then(tc=>{
+  fetch(ngUrl('/api/udp_status')).then(r=>r.json()).then(u=>{
+    var w=document.getElementById('udp_warn');
+    if(!u.udp_detected){w.style.display='none';return;}
+    var doms=Object.keys(u.domains||{});
+    w.style.display='block';
+    w.innerHTML='<div style="background:rgba(248,81,73,.08);border:1px solid var(--er);border-radius:var(--r);padding:10px 14px;font-size:13px;color:var(--er)">'
+      +'⚠ <b>UDP trackers detected</b> — '+u.affected_count+' torrent(s) announce to '+doms.length+' UDP domain(s). '
+      +'These announces bypass the HTTP proxy and report <b>real</b> statistics. '
+      +'<span class="muted">('+doms.slice(0,4).join(', ')+(doms.length>4?', …':'')+')</span>'
+      +'</div>';
+  }).catch(()=>{});
+  fetch(ngUrl('/api/tracker_stats')).then(r=>r.json()).then(tc=>{
     var w=document.getElementById('tracker_warn');
     var alerts=Object.entries(tc).filter(([d,v])=>v.pct_of_cap!=null&&v.pct_of_cap>=80);
     if(!alerts.length){w.style.display='none';return;}

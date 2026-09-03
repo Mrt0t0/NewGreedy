@@ -14,6 +14,7 @@ services:
       - ./torrent_registry.json:/app/torrent_registry.json
       - ./newgreedy.log:/app/newgreedy.log
       - ./static:/app/static
+      - ./torrents:/app/torrents
       - mitmproxy_ca:/root/.mitmproxy
     environment:
       - PYTHONUNBUFFERED=1

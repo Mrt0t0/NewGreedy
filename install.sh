@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -e
-VERSION="v1.7.5"
+VERSION="v1.7.6"
 UPDATE=false
 for arg in "$@"; do [ "$arg" = "--update" ] && UPDATE=true; done
 
@@ -13,8 +13,19 @@ echo "[NewGreedy $VERSION] Starting install (update=$UPDATE)..."
 python3 -m pip install -q --break-system-packages -r requirements.txt
 echo "[NewGreedy] Dependencies installed."
 
-mkdir -p $DEST/static
+mkdir -p $DEST/static $DEST/torrents
+if $UPDATE; then
+  for f in config.ini stats.json torrent_registry.json; do
+    [ -f "$DEST/$f" ] && cp "$DEST/$f" "/tmp/ng_$f.bak" 2>/dev/null || true
+  done
+fi
 cp -r . $DEST/
+if $UPDATE; then
+  for f in config.ini stats.json torrent_registry.json; do
+    [ -f "/tmp/ng_$f.bak" ] && cp "/tmp/ng_$f.bak" "$DEST/$f" && rm -f "/tmp/ng_$f.bak"
+  done
+  echo "[NewGreedy] Existing config.ini and stats preserved."
+fi
 chmod +x $DEST/newgreedy.py
 echo "[NewGreedy] Files copied to $DEST"
 
@@ -31,7 +42,7 @@ fi
 if ! $UPDATE; then
   cat > $SERVICE <<EOF
 [Unit]
-Description=NewGreedy $VERSION — BitTorrent ratio spoofer
+Description=NewGreedy $VERSION - BitTorrent ratio spoofer
 After=network.target
 
 [Service]
@@ -40,6 +51,8 @@ WorkingDirectory=$DEST
 ExecStart=/usr/bin/python3 $DEST/newgreedy.py
 Restart=on-failure
 RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=20
 StandardOutput=journal
 StandardError=journal
 
@@ -58,3 +71,4 @@ fi
 echo "[NewGreedy $VERSION] Installation complete."
 echo "  Proxy  : 127.0.0.1:3456"
 echo "  Web UI : http://localhost:8080"
+echo "  Watch  : $DEST/torrents  (drop .torrent files here)"

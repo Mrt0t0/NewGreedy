@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>NewGreedy — Config</title>
-<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/style.css?v=1.7.6">
 </head>
 <body>
 <nav>
@@ -35,6 +35,24 @@
   <div class="alert hid" id="cfgalert"></div>
 </div>
 <div class="sec">
+  <div class="sec-t">✏️ Edit a setting</div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+    <div style="flex:2;min-width:220px">
+      <label class="flbl">Key</label>
+      <select id="ekey"><option value="">— Loading —</option></select>
+    </div>
+    <div style="flex:1;min-width:140px">
+      <label class="flbl">New value</label>
+      <input id="eval" placeholder="value">
+    </div>
+    <button class="btn pri" onclick="saveKey()">Save</button>
+  </div>
+  <div class="alert hid" id="editalert"></div>
+  <div class="muted" style="font-size:12px;margin-top:8px">
+    Changes are written to config.ini and reloaded immediately. Port changes still need a restart.
+  </div>
+</div>
+<div class="sec">
   <div class="sec-t">📤 Upload .torrent — pre-register</div>
   <div class="upzone"
        onclick="document.getElementById('fup').click()"
@@ -50,7 +68,17 @@
 </div>
 
 </main>
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=1.7.6"></script>
+<script>
+if (typeof ngUrl !== 'function') {
+  document.addEventListener('DOMContentLoaded', function () {
+    var d = document.createElement('div');
+    d.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:#f85149;color:#fff;padding:10px 14px;font:13px -apple-system,sans-serif;text-align:center';
+    d.innerHTML = 'static/app.js failed to load or is outdated. Force-reload the page (Ctrl+Shift+R / Cmd+Shift+R) or check that static/app.js is present on the server.';
+    document.body.insertBefore(d, document.body.firstChild);
+  });
+}
+</script>
 <script>
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -70,12 +98,43 @@ function reload(){
 function handleFiles(files){
   Array.from(files).forEach(f=>{
     var fd=new FormData(); fd.append('file',f);
-    fetch('/api/upload',{method:'POST',body:fd}).then(r=>r.json())
+    fetch(ngUrl('/api/upload'),{method:'POST',body:fd}).then(r=>r.json())
       .then(d=>sa('upalert','✓ '+f.name+' — ih:'+d.infohash+' '+fB(d.size_estimate),'ok'))
       .catch(e=>sa('upalert','✗ '+e.message,'er'));
   });
 }
+function loadEditable(){
+  Promise.all([API.get('/api/config/editable'),API.get('/api/config')]).then(function(res){
+    var keys=res[0].keys||[], cfg=res[1]||{};
+    var sel=document.getElementById('ekey');
+    sel.innerHTML='';
+    keys.forEach(function(k){
+      var parts=k.split('.'), cur=(cfg[parts[0]]||{})[parts[1]];
+      var o=document.createElement('option');
+      o.value=k; o.textContent=k+(cur!==undefined?'  ('+cur+')':'');
+      o.dataset.cur=cur===undefined?'':cur;
+      sel.appendChild(o);
+    });
+    sel.onchange=function(){
+      var o=sel.options[sel.selectedIndex];
+      document.getElementById('eval').value=o?o.dataset.cur:'';
+    };
+    if(sel.options.length) sel.onchange();
+  }).catch(function(e){sa('editalert','Error: '+e.message,'er');});
+}
+function saveKey(){
+  var k=document.getElementById('ekey').value;
+  var v=document.getElementById('eval').value;
+  if(!k){sa('editalert','Select a key first','er');return;}
+  var p=k.split('.');
+  API.post('/api/config/set',{section:p[0],key:p[1],value:v}).then(function(d){
+    if(d.error){sa('editalert','✗ '+d.error,'er');return;}
+    sa('editalert','✓ '+k+' = '+d.value,'ok');
+    loadCfg(); loadEditable();
+  }).catch(function(e){sa('editalert','Error: '+e.message,'er');});
+}
 loadCfg();
+loadEditable();
 
 initUI('config');
 </script>
