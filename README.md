@@ -739,17 +739,6 @@ The purge preview endpoint now reads through the shared 2 s cache instead of hit
 **Shared version module**
 Version parsing and the GitHub release check are consolidated into `_version.py`, removing duplication between the launcher and the web app. `import os` and `import configparser` dead imports removed.
 
-#### Verification
-
-**Test suite**
-A `tests/` folder with 10 pytest cases covers the ratio engine, per-torrent and global caps, target-reached short-circuit, atomic writes, FastAPI routing order, filename sanitisation and `inject_hours` parsing.
-
-**CI pipeline**
-`.github/workflows/ci.yml` runs ruff lint, the pytest suite, and a Docker build + `/api/health` smoke test on every push and pull request.
-
-**Pinned dependencies**
-`requirements.txt` now uses version bounds (e.g. `mitmproxy>=10.0,<12.0`) to guard against breaking releases.
-
 ---
 
 ---
