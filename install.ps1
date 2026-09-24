@@ -1,6 +1,6 @@
-﻿param([switch]$Update, [switch]$Uninstall)
+﻿param([switch]$Update, [switch]$Uninstall, [switch]$KeepScrape)
 
-$Version  = "v1.7.6"
+$Version  = "v1.7.7"
 $Dest     = "$env:LOCALAPPDATA\NewGreedy"
 $TaskName = "NewGreedy"
 $LogFile  = "$Dest\install.log"
@@ -38,22 +38,49 @@ Log "Dependencies installed."
 New-Item -ItemType Directory -Force -Path "$Dest\static" | Out-Null
 New-Item -ItemType Directory -Force -Path "$Dest\torrents" | Out-Null
 
-$preserve = @("config.ini", "stats.json", "torrent_registry.json")
+$preserve = @("stats.json", "torrent_registry.json", "control.json", "purge_pending.json")
 $backup   = @{}
+$oldCfg   = $null
 if ($Update) {
   foreach ($f in $preserve) {
     $p = Join-Path $Dest $f
     if (Test-Path $p) { $backup[$f] = Get-Content -Raw -Encoding UTF8 $p }
   }
+  $cfgPath = Join-Path $Dest "config.ini"
+  if (Test-Path $cfgPath) {
+    $oldCfg = Join-Path $env:TEMP "newgreedy-config-previous.ini"
+    Copy-Item -Force $cfgPath $oldCfg
+  }
 }
 
-Copy-Item -Recurse -Force ".\*" $Dest
+$programFiles = @("newgreedy.py", "newgreedy_addon.py", "newgreedy_web.py", "_version.py",
+                  "client_profiles.py", "updater.py", "config_merge.py", "requirements.txt",
+                  "README.md", "LICENSE", "install.ps1", "install.sh", "install-macos.sh",
+                  "uninstall.sh", "Dockerfile", "docker-compose.yml", "config.ini")
+foreach ($f in $programFiles) {
+  if (Test-Path $f) { Copy-Item -Force $f (Join-Path $Dest $f) }
+}
+Copy-Item -Force ".\static\*" (Join-Path $Dest "static")
 
 if ($Update) {
   foreach ($f in $backup.Keys) {
-    Set-Content -Path (Join-Path $Dest $f) -Value $backup[$f] -Encoding UTF8
+    Set-Content -Path (Join-Path $Dest $f) -Value $backup[$f] -Encoding UTF8 -NoNewline
   }
-  Log "Existing config.ini and stats preserved."
+  if ($oldCfg) {
+    Log "Merging config.ini - your settings into the $Version template..."
+    $mergeArgs = @("$Dest\config_merge.py", "--shipped", "$Dest\config.ini",
+                   "--current", $oldCfg, "--out", "$Dest\config.ini")
+    if ($KeepScrape) { $mergeArgs += "--keep-scrape" }
+    python @mergeArgs
+    if ($LASTEXITCODE -eq 0) {
+      Log "config.ini merged."
+    } else {
+      Copy-Item -Force $oldCfg "$Dest\config.ini"
+      Log "WARNING: merge failed - your previous config.ini was kept untouched."
+    }
+    Remove-Item -Force $oldCfg -ErrorAction SilentlyContinue
+  }
+  Log "Stats, registry, control file and torrents\ preserved."
 }
 Log "Files copied to $Dest"
 

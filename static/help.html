@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>NewGreedy — Help</title>
-<link rel="stylesheet" href="/static/style.css?v=1.7.6">
+<link rel="stylesheet" href="/static/style.css?v=1.7.7">
 </head>
 <body>
 <nav>
@@ -33,7 +33,10 @@
     <div><div class="muted" style="font-size:11px;text-transform:uppercase">Latest on GitHub</div>
       <div style="font-size:22px;font-weight:700;font-family:var(--mono);color:var(--ok)" id="vgit">—</div></div>
     <a id="vlink" href="#" target="_blank" class="btn pri" style="display:none">View release ↗</a>
+    <button id="upbtn" class="btn pri" style="display:none" onclick="startUpdate()">⬆ Update now</button>
+    <button id="rsbtn" class="btn" style="display:none" onclick="doRestart()">↻ Restart to apply</button>
   </div>
+  <div id="upstate" style="display:none;font-size:12px;margin-top:10px"></div>
   <div id="verr" class="muted" style="display:none;font-size:12px;margin-top:6px">
   </div>
 </div>
@@ -54,9 +57,18 @@
       <tr><td class="mono">[STALL_ALGO]</td><td>Algorithm stagnation active</td></tr>
       <tr><td class="mono">[TARGET_REACHED]</td><td>Target ratio reached — injection stopped</td></tr>
       <tr><td class="mono">[PURGED]</td><td>Torrent removed from stats after event=stopped</td></tr>
+      <tr><td class="mono">[STOPPED]</td><td>event=stopped received — retired once stopped_purge_delay has passed</td></tr>
+      <tr><td class="mono">[RESUMED]</td><td>It announced again inside that delay — counters kept</td></tr>
+      <tr><td class="mono">[DL_CAP]</td><td>Reported download held back so left falls at a credible speed</td></tr>
       <tr><td class="mono">[GLOBAL_CAP]</td><td>Global tracker ratio cap reached — upload reduced</td></tr>
       <tr><td class="mono">[TRACKER_DOWN]</td><td>Tracker entering backoff after repeated 5xx errors</td></tr>
       <tr><td class="mono">[UDP_BYPASS]</td><td>UDP tracker detected — announces are not intercepted</td></tr>
+      <tr><td class="mono">[PAUSED]</td><td>Injection suspended for this torrent</td></tr>
+      <tr><td class="mono">[DRY-RUN]</td><td>Simulation mode — the announce was not modified</td></tr>
+      <tr><td class="mono">[IDENTITY]</td><td>Session client, peer_id and port chosen at startup</td></tr>
+      <tr><td class="mono">[DESYNC]</td><td>Another torrent announced to the same tracker within desync_min_gap</td></tr>
+      <tr><td class="mono">[BURST]</td><td>Startup window — injected upload is still ramping up</td></tr>
+      <tr><td class="mono">[CONTROL]</td><td>Pause/override/tag file reloaded</td></tr>
       <tr><td class="mono">[WATCH]</td><td>Torrent auto-imported from the watch folder</td></tr>
       <tr><td class="mono">[CUMUL_PURGE]</td><td>Inactive tracker dropped from the cumulative ratio</td></tr>
     </tbody>
@@ -82,6 +94,13 @@
       <tr><td class="mono">/api/config/editable</td><td class="muted">GET</td><td>List of settings editable from the UI</td></tr>
       <tr><td class="mono">/api/config/set</td><td class="muted">POST</td><td>Update one setting in config.ini</td></tr>
       <tr><td class="mono">/api/stats/{ih}</td><td class="muted">DELETE</td><td>Delete a single torrent</td></tr>
+      <tr><td class="mono">/api/control</td><td class="muted">GET</td><td>Paused torrents, overrides and tags</td></tr>
+      <tr><td class="mono">/api/control/pause</td><td class="muted">POST</td><td>Pause or resume one torrent</td></tr>
+      <tr><td class="mono">/api/control/override</td><td class="muted">POST</td><td>Force target ratio or upload total</td></tr>
+      <tr><td class="mono">/api/control/tags</td><td class="muted">POST</td><td>Assign tags to a torrent</td></tr>
+      <tr><td class="mono">/api/profiles</td><td class="muted">GET</td><td>Available emulated client profiles</td></tr>
+      <tr><td class="mono">/api/backup</td><td class="muted">GET</td><td>Download a zip of config and stats</td></tr>
+      <tr><td class="mono">/api/restore</td><td class="muted">POST</td><td>Restore a backup archive</td></tr>
       <tr><td class="mono">/metrics</td><td class="muted">GET</td><td>Prometheus metrics</td></tr>
       <tr><td class="mono">/ws/logs</td><td class="muted">WS</td><td>Real-time log stream</td></tr>
     </tbody>
@@ -99,7 +118,7 @@
 </div>
 
 </main>
-<script src="/static/app.js?v=1.7.6"></script>
+<script src="/static/app.js?v=1.7.7"></script>
 <script>
 if (typeof ngUrl !== 'function') {
   document.addEventListener('DOMContentLoaded', function () {
@@ -123,6 +142,7 @@ API.get('/api/version').then(v=>{
     g.style.color=v.update_available?'var(--wa)':'var(--ok)';
     g.title=v.cached?'cached result':'';
     if(v.update_available){
+      document.getElementById('upbtn').style.display='inline-block';
       var l=document.getElementById('vlink');
       l.href=v.url||'https://github.com/Mrt0t0/NewGreedy/releases';
       l.style.display='inline-block';
@@ -140,6 +160,63 @@ API.get('/api/version').then(v=>{
   var note=document.getElementById('verr');
   if(note){note.textContent='Could not reach the local API: '+e.message;note.style.display='block';}
 });
+
+var _upTimer=null;
+function showState(cls,txt){
+  var e=document.getElementById('upstate');
+  e.style.display='block';
+  e.className='alert '+cls;
+  e.textContent=txt;
+}
+function startUpdate(){
+  if(!confirm('Download the latest release and replace the program files?\n\nconfig.ini, stats.json and your torrent data are preserved.')) return;
+  document.getElementById('upbtn').disabled=true;
+  API.post('/api/update/start',{}).then(d=>{
+    if(!d.started){showState('er','✗ '+d.message);document.getElementById('upbtn').disabled=false;return;}
+    showState('ok','⏳ '+d.message);
+    pollUpdate();
+  }).catch(e=>{showState('er','✗ '+e.message);document.getElementById('upbtn').disabled=false;});
+}
+function pollUpdate(){
+  if(_upTimer) clearInterval(_upTimer);
+  _upTimer=setInterval(()=>{
+    API.get('/api/update/status').then(s=>{
+      if(s.status==='downloading'||s.status==='applying'){
+        showState('ok','⏳ '+s.status+' — '+s.message);
+        return;
+      }
+      clearInterval(_upTimer);
+      if(s.status==='done'){
+        showState('ok','✓ '+s.message);
+        document.getElementById('rsbtn').style.display='inline-block';
+        document.getElementById('upbtn').style.display='none';
+      }else if(s.status==='error'){
+        showState('er','✗ '+s.message+' — previous files were restored');
+        document.getElementById('upbtn').disabled=false;
+      }
+    }).catch(()=>clearInterval(_upTimer));
+  },1500);
+}
+function doRestart(){
+  if(!confirm('Restart NewGreedy now?')) return;
+  showState('ok','⏳ restarting…');
+  API.post('/api/restart',{}).catch(()=>{});
+  setTimeout(()=>{
+    var tries=0;
+    var t=setInterval(()=>{
+      tries++;
+      API.get('/api/update/status').then(()=>{clearInterval(t);location.reload();})
+        .catch(()=>{if(tries>20){clearInterval(t);showState('er','Service did not come back — check the logs');}});
+    },1500);
+  },2500);
+}
+API.get('/api/update/status').then(s=>{
+  if(s.restart_pending){
+    document.getElementById('rsbtn').style.display='inline-block';
+    showState('ok','An update was applied — restart to load the new files');
+  }
+  if(s.status==='downloading'||s.status==='applying') pollUpdate();
+}).catch(()=>{});
 
 initUI('help');
 </script>

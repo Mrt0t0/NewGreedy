@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NewGreedy v1.7.6 — launcher"""
+"""NewGreedy v1.7.7 — launcher"""
 #
 # NewGreedy - BitTorrent announce proxy
 # Copyright (C) 2026  Mrt0t0
@@ -17,7 +17,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #
-import configparser, json, logging, os, signal, sys, tempfile, threading, time, socket
+import configparser, json, logging, re, signal, sys, threading, time, socket
 from pathlib import Path
 from _version import VERSION, parse_version, fetch_latest
 
@@ -33,7 +33,7 @@ _root_logger.addHandler(_handler)
 logging.getLogger("passlib").setLevel(logging.ERROR)
 logger = logging.getLogger("NewGreedy")
 
-cfg = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
+cfg = configparser.ConfigParser(inline_comment_prefixes=(";", "#"), interpolation=None)
 cfg.read(str(_CONFIG_FILE))
 
 _shutting_down = threading.Event()
@@ -75,7 +75,6 @@ for _sig in ("SIGTERM", "SIGINT"):
 
 def _check_update():
     try:
-        socket.setdefaulttimeout(4)
         data = fetch_latest(timeout=4)
         latest = data.get("tag_name", "").strip()
         if latest and parse_version(latest) > parse_version(VERSION):
@@ -99,6 +98,19 @@ def _start_web():
         logger.warning("Web UI not started: %s", e)
 
 
+def _upstream_args():
+    url = (cfg.get("upstream", "proxy_url", fallback="") or "").strip()
+    if not url:
+        return []
+    args = ["--mode", "upstream:" + url]
+    bypass = [d.strip() for d in cfg.get("upstream", "proxy_bypass", fallback="").split(",") if d.strip()]
+    for domain in bypass:
+        args += ["--ignore-hosts", re.escape(domain)]
+    logger.info("Upstream proxy enabled: %s%s", url,
+                f" (bypass: {', '.join(bypass)})" if bypass else "")
+    return args
+
+
 def _run_mitm(listen_port):
     from mitmproxy.tools.main import mitmdump
     sys.argv = [
@@ -106,7 +118,7 @@ def _run_mitm(listen_port):
         "--listen-host", "0.0.0.0",
         "--listen-port", str(listen_port),
         "-s", str(_BASE / "newgreedy_addon.py"),
-    ]
+    ] + _upstream_args()
     mitmdump()
 
 
@@ -154,8 +166,24 @@ def _watchdog(listen_port, max_restarts=5):
     sys.exit(1)
 
 
+def _consume_restart_flag():
+    flag = _BASE / ".restart"
+    try:
+        info = json.loads(flag.read_text(encoding="utf-8"))
+        flag.unlink()
+        logger.info("Updated to %s - running the new files", info.get("tag", "?"))
+    except FileNotFoundError:
+        pass
+    except Exception:
+        try:
+            flag.unlink()
+        except OSError:
+            pass
+
+
 def main():
     logger.info("NewGreedy %s starting...", VERSION)
+    _consume_restart_flag()
     try:
         _SHUTDOWN_FLAG.unlink()
     except FileNotFoundError:

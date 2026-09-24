@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NewGreedy v1.7.6 — Web UI & API"""
+"""NewGreedy v1.7.7 — Web UI & API"""
 #
 # NewGreedy - BitTorrent announce proxy
 # Copyright (C) 2026  Mrt0t0
@@ -17,13 +17,16 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #
-import hashlib, hmac, json, pathlib, logging, asyncio, re, time, threading
+import hmac, io, json, os, pathlib, logging, asyncio, re, time, threading, zipfile
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Query, Request, Body
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse, PlainTextResponse
-from _version import VERSION, parse_version, fetch_latest
+from _version import (VERSION, fetch_latest, parse_version, notify_configure,
+                      torrent_info, tracker_urls, atomic_write_json, atomic_write_bytes)
+import client_profiles
+import updater
 
 @asynccontextmanager
 async def _lifespan(_app):
@@ -49,6 +52,7 @@ REGISTRY_FILE      = BASE_DIR / "torrent_registry.json"
 LOG_FILE           = BASE_DIR / "newgreedy.log"
 STATIC_DIR         = BASE_DIR / "static"
 CONFIG_FILE        = BASE_DIR / "config.ini"
+CONTROL_FILE       = BASE_DIR / "control.json"
 
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -80,16 +84,96 @@ EDITABLE_KEYS = {
     ("advanced", "min_announce_interval"), ("advanced", "log_level"),
     ("advanced", "inject_hours"), ("advanced", "interval_jitter_pct"),
     ("advanced", "stall_announce_threshold"), ("advanced", "min_announces_before_stagnation"),
-    ("advanced", "event_anomaly_probability"), ("advanced", "corrupt_field_probability"),
+    ("advanced", "corrupt_field_probability"),
     ("advanced", "respect_tracker_interval"),
     ("anti_detection", "user_agent_mode"), ("anti_detection", "user_agent_value"),
     ("anti_detection", "spoof_user_agent"), ("anti_detection", "spoof_peer_id"),
     ("anti_detection", "spoof_peers"), ("anti_detection", "spoof_port"),
     ("anti_detection", "spoof_headers"), ("anti_detection", "intercept_scrape"),
+    ("anti_detection", "echo_trackerid"),
     ("anti_detection", "tracker_whitelist"), ("anti_detection", "tracker_blacklist"),
+    ("anti_detection", "desync_announces"), ("anti_detection", "desync_spread_pct"),
+    ("anti_detection", "desync_min_gap"), ("anti_detection", "startup_burst"),
+    ("anti_detection", "startup_burst_window"), ("anti_detection", "startup_ramp_floor"),
     ("stats", "persist_stats"), ("stats", "auto_purge_stopped"),
-    ("stats", "tracker_cumul_ttl_days"),
+    ("stats", "tracker_cumul_ttl_days"), ("stats", "stopped_purge_delay"),
+    ("client", "client_profile"), ("client", "rotate_profile_on_restart"),
+    ("client", "session_identity"), ("client", "version_bump_probability"),
+    ("bandwidth", "global_max_speed_mbps"), ("bandwidth", "per_torrent_speed_cap_mbps"),
+    ("bandwidth", "max_download_speed_mbps"),
+    ("bandwidth", "circadian_smoothing"), ("bandwidth", "circadian_night_factor"),
+    ("notifications", "webhook_format"), ("notifications", "webhook_events"),
+    ("simulation", "dry_run"),
 }
+
+
+KEY_RULES = {
+    "target_ratio": ("float", 0.01, 100.0), "target_ratio_buffer": ("float", 0.0, 10.0),
+    "catch_up_factor": ("float", 0.001, 1.0), "max_ratio_per_torrent": ("float", 0.01, 100.0),
+    "max_global_ratio_per_tracker": ("float", 0.01, 100.0),
+    "max_simulated_speed_mbps": ("float", 0.01, 10000.0),
+    "upload_noise_pct": ("float", 0.0, 100.0), "stagnation_probability": ("float", 0.0, 1.0),
+    "seed_credit_mb": ("float", 0.0, 100000.0), "seed_target_mb": ("float", 0.0, 1e7),
+    "min_announce_interval": ("int", 60, 86400),
+    "stall_announce_threshold": ("int", 1, 1000),
+    "min_announces_before_stagnation": ("int", 0, 1000),
+    "interval_jitter_pct": ("float", 0.0, 1.0),
+    "corrupt_field_probability": ("float", 0.0, 1.0),
+    "desync_spread_pct": ("float", 0.0, 0.45), "desync_min_gap": ("int", 0, 3600),
+    "startup_burst_window": ("int", 0, 86400), "startup_ramp_floor": ("float", 0.0, 1.0),
+    "tracker_cumul_ttl_days": ("int", 0, 3650),
+    "stopped_purge_delay": ("int", 0, 86400),
+    "version_bump_probability": ("float", 0.0, 1.0),
+    "global_max_speed_mbps": ("float", 0.0, 10000.0),
+    "per_torrent_speed_cap_mbps": ("float", 0.01, 10000.0),
+    "max_download_speed_mbps": ("float", 0.0, 10000.0),
+    "circadian_night_factor": ("float", 0.0, 1.0),
+    "auto_stop_at_target": ("bool",), "anti_clustering": ("bool",),
+    "respect_tracker_interval": ("bool",), "spoof_user_agent": ("bool",),
+    "spoof_peer_id": ("bool",), "spoof_peers": ("bool",), "spoof_port": ("bool",),
+    "spoof_headers": ("bool",), "intercept_scrape": ("bool",),
+    "desync_announces": ("bool",), "startup_burst": ("bool",),
+    "echo_trackerid": ("bool",),
+    "persist_stats": ("bool",), "auto_purge_stopped": ("bool",),
+    "rotate_profile_on_restart": ("bool",), "circadian_smoothing": ("bool",),
+    "dry_run": ("bool",),
+    "log_level": ("choice", ("DEBUG", "INFO", "WARNING", "ERROR")),
+    "user_agent_mode": ("choice", ("random", "fixed")),
+    "session_identity": ("choice", ("stable", "drift", "rotate")),
+    "webhook_format": ("choice", ("generic", "discord", "slack")),
+    "inject_hours": ("hours",), "client_profile": ("profile",),
+}
+
+_BOOLS = {"true", "false", "yes", "no", "on", "off", "1", "0"}
+
+
+def _validate_value(key: str, value: str):
+    rule = KEY_RULES.get(key)
+    if not rule:
+        return None
+    kind = rule[0]
+    if kind in ("float", "int"):
+        try:
+            num = float(value) if kind == "float" else int(value)
+        except ValueError:
+            return f"{key} must be a{'' if kind == 'int' else ' decimal'} number"
+        if not (rule[1] <= num <= rule[2]):
+            return f"{key} must be between {rule[1]} and {rule[2]}"
+        return None
+    if kind == "bool":
+        return None if value.lower() in _BOOLS else f"{key} must be true or false"
+    if kind == "choice":
+        return None if value.lower() in [c.lower() for c in rule[1]] else \
+            f"{key} must be one of: {', '.join(rule[1])}"
+    if kind == "hours":
+        m = re.fullmatch(r"(\d{1,2})-(\d{1,2})", value)
+        if not m or not all(0 <= int(g) <= 23 for g in m.groups()):
+            return "inject_hours must look like 8-22, with both values between 0 and 23"
+        return None
+    if kind == "profile":
+        allowed = client_profiles.profile_names() + ["random"]
+        return None if value.lower() in allowed else f"client_profile must be one of: {', '.join(allowed)}"
+    return None
 
 
 def set_config(c):
@@ -102,8 +186,23 @@ def set_config(c):
     except Exception:
         _RATE_LIMIT = 240
     _WATCH_FOLDER = (c.get("advanced", "watch_folder", fallback="") or "").strip()
+    try:
+        notify_configure(
+            c.get("notifications", "webhook_url", fallback=""),
+            c.get("notifications", "webhook_format", fallback="generic"),
+            c.get("notifications", "webhook_events", fallback=""),
+        )
+    except Exception as e:
+        logger.debug("notifier config error: %s", e)
     if _SECRET_TOKEN:
         logger.info("Web UI authentication enabled")
+    else:
+        host = (c.get("web", "web_host", fallback="0.0.0.0") or "").strip()
+        if host not in ("127.0.0.1", "localhost", "::1"):
+            logger.warning(
+                "Web UI bound to %s with no web_secret_token - anyone who can reach "
+                "port %s may read stats, purge data, restore backups and trigger updates",
+                host, c.get("web", "web_port", fallback="8080"))
     if _PATH_PREFIX:
         logger.info("Web UI served under /%s/", _PATH_PREFIX)
 
@@ -155,6 +254,8 @@ async def _guard(request: Request, call_next):
     if rate_limited and not _rate_ok(client_ip):
         return JSONResponse({"error": "rate limit exceeded"}, status_code=429)
     if not _token_ok(request):
+        if not rate_limited and not _rate_ok(client_ip):
+            return JSONResponse({"error": "rate limit exceeded"}, status_code=429)
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     response = await call_next(request)
     if request.url.path in ("/", "/torrents", "/charts", "/config", "/logs", "/help"):
@@ -191,8 +292,8 @@ def _write_purge_pending(hashes: list):
         existing = []
         if PURGE_PENDING_FILE.exists():
             existing = json.loads(PURGE_PENDING_FILE.read_text(encoding="utf-8"))
-        merged = list(set(existing) | set(hashes))
-        PURGE_PENDING_FILE.write_text(json.dumps(merged), encoding="utf-8")
+        merged = sorted(set(existing) | set(hashes))
+        atomic_write_json(PURGE_PENDING_FILE, merged)
     except Exception as e:
         logger.warning("purge_pending write error: %s", e)
 
@@ -205,6 +306,29 @@ def _sanitize_filename(name: str) -> str:
     return name[:255].strip()
 
 
+def _load_control():
+    try:
+        with open(CONTROL_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        data = {}
+    return {
+        "paused":    list(data.get("paused", [])),
+        "overrides": dict(data.get("overrides", {})),
+        "tags":      dict(data.get("tags", {})),
+    }
+
+
+def _save_control(ctl):
+    try:
+        atomic_write_json(CONTROL_FILE, ctl)
+        return True
+    except Exception as e:
+        logger.warning("control write error: %s", e)
+        return False
+
+
+
 def _load_registry():
     try:
         with open(REGISTRY_FILE, encoding="utf-8") as f:
@@ -215,8 +339,7 @@ def _load_registry():
 
 
 def _save_registry(reg):
-    with open(REGISTRY_FILE, "w", encoding="utf-8") as f:
-        json.dump(reg, f, indent=2)
+    atomic_write_json(REGISTRY_FILE, reg)
 
 
 def _load_stats():
@@ -256,13 +379,15 @@ def _tail_log(n=500):
 @app.get("/", response_class=HTMLResponse)
 async def index():
     f = STATIC_DIR / "index.html"
-    return f.read_text(encoding="utf-8") if f.exists() else "<h1>NewGreedy v1.7.6</h1>"
+    return f.read_text(encoding="utf-8") if f.exists() else "<h1>NewGreedy v1.7.7</h1>"
 
 
 @app.get("/api/stats")
 async def api_stats():
     data = _load_stats()
     reg  = _load_registry()
+    ctl  = _load_control()
+    paused_set = set(ctl["paused"])
     result = {}
     for k, v in data.items():
         entry = dict(v)
@@ -278,6 +403,10 @@ async def api_stats():
         if isinstance(meta, dict):
             entry["name"]     = meta.get("name", "")
             entry["has_udp"]  = bool(meta.get("udp_trackers"))
+        entry["paused"]   = k in paused_set
+        entry["tags"]     = ctl["tags"].get(k, [])
+        entry["override"] = ctl["overrides"].get(k, {})
+        entry["client"]   = entry.get("profile", "")
         entry.pop("peer_id", None)
         entry.pop("key", None)
         result[k] = entry
@@ -327,6 +456,182 @@ async def api_udp_status():
     }
 
 
+@app.get("/api/control")
+async def api_control_get():
+    return _load_control()
+
+
+@app.post("/api/control/pause")
+async def api_control_pause(payload: dict = Body(...)):
+    ih = str(payload.get("hash", ""))[:8].lower()
+    if not VALID_HASH_RE.match(ih):
+        return JSONResponse({"error": "invalid hash"}, status_code=400)
+    paused = bool(payload.get("paused", True))
+    ctl = _load_control()
+    current = set(ctl["paused"])
+    current.add(ih) if paused else current.discard(ih)
+    ctl["paused"] = sorted(current)
+    if not _save_control(ctl):
+        return JSONResponse({"error": "could not write control file"}, status_code=500)
+    return {"hash": ih, "paused": paused}
+
+
+@app.post("/api/control/override")
+async def api_control_override(payload: dict = Body(...)):
+    ih = str(payload.get("hash", ""))[:8].lower()
+    if not VALID_HASH_RE.match(ih):
+        return JSONResponse({"error": "invalid hash"}, status_code=400)
+    ctl = _load_control()
+    entry = dict(ctl["overrides"].get(ih, {}))
+    for field, lo, hi in (("target_ratio", 0.0, 100.0), ("cumul_rep_ul", 0.0, 1e15)):
+        if field in payload and payload[field] is not None:
+            try:
+                val = float(payload[field])
+            except (TypeError, ValueError):
+                return JSONResponse({"error": f"{field} must be numeric"}, status_code=400)
+            if not (lo <= val <= hi):
+                return JSONResponse({"error": f"{field} out of range"}, status_code=400)
+            entry[field] = val
+    if payload.get("clear"):
+        ctl["overrides"].pop(ih, None)
+    elif entry:
+        ctl["overrides"][ih] = entry
+    if not _save_control(ctl):
+        return JSONResponse({"error": "could not write control file"}, status_code=500)
+    return {"hash": ih, "override": ctl["overrides"].get(ih, {})}
+
+
+@app.post("/api/control/tags")
+async def api_control_tags(payload: dict = Body(...)):
+    ih = str(payload.get("hash", ""))[:8].lower()
+    if not VALID_HASH_RE.match(ih):
+        return JSONResponse({"error": "invalid hash"}, status_code=400)
+    raw = payload.get("tags", [])
+    if isinstance(raw, str):
+        raw = [t for t in raw.split(",")]
+    tags = sorted({re.sub(r"[^\w\- ]", "", str(t)).strip()[:32] for t in raw if str(t).strip()})
+    ctl = _load_control()
+    if tags:
+        ctl["tags"][ih] = tags
+    else:
+        ctl["tags"].pop(ih, None)
+    if not _save_control(ctl):
+        return JSONResponse({"error": "could not write control file"}, status_code=500)
+    return {"hash": ih, "tags": tags}
+
+
+@app.get("/api/update/status")
+async def api_update_status():
+    st = updater.status()
+    st["current"] = VERSION
+    st["restart_pending"] = updater.RESTART_FLAG.exists()
+    return st
+
+
+@app.post("/api/update/start")
+async def api_update_start(payload: dict = Body(default={})):
+    ok, msg = updater.start(force=bool(payload.get("force")))
+    return JSONResponse({"started": ok, "message": msg},
+                        status_code=200 if ok else 409)
+
+
+@app.post("/api/update/rollback")
+async def api_update_rollback():
+    try:
+        n = updater.rollback()
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    if not n:
+        return JSONResponse({"error": "no backup available"}, status_code=404)
+    return {"restored": n, "note": "restart NewGreedy to load the previous files"}
+
+
+RESTART_FLUSH_TIMEOUT = 8.0
+
+
+def _exit_after_flush(flag: pathlib.Path):
+    deadline = time.monotonic() + RESTART_FLUSH_TIMEOUT
+    while time.monotonic() < deadline:
+        if not flag.exists():
+            break
+        time.sleep(0.2)
+    else:
+        logger.warning("restart: stats flush did not confirm within %.0fs", RESTART_FLUSH_TIMEOUT)
+    time.sleep(0.3)
+    os._exit(42)
+
+
+@app.post("/api/restart")
+async def api_restart():
+    flag = BASE_DIR / ".shutdown"
+    try:
+        atomic_write_json(flag, {"ts": int(time.time()), "reason": "restart"})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    threading.Thread(target=_exit_after_flush, args=(flag,), daemon=True).start()
+    return {"status": "restarting",
+            "note": "the service manager brings NewGreedy back up automatically"}
+
+
+
+@app.get("/api/profiles")
+async def api_profiles():
+    out = {}
+    for name in client_profiles.profile_names():
+        p = client_profiles.PROFILES[name]
+        out[name] = {
+            "name":        p["name"],
+            "user_agents": client_profiles.user_agents(p),
+            "numwant":     p["numwant"],
+            "param_order": p["param_order"],
+        }
+    return out
+
+
+@app.get("/api/backup")
+async def api_backup():
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for path in (CONFIG_FILE, STATS_FILE, REGISTRY_FILE, CONTROL_FILE):
+            if path.exists():
+                z.write(path, path.name)
+    buf.seek(0)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename=newgreedy-backup-{stamp}.zip"},
+    )
+
+
+@app.post("/api/restore")
+async def api_restore(file: UploadFile = File(...)):
+    data = await file.read(MAX_UPLOAD_SIZE + 1)
+    if len(data) > MAX_UPLOAD_SIZE:
+        return JSONResponse({"error": "archive too large"}, status_code=413)
+    allowed = {"config.ini", "stats.json", "torrent_registry.json", "control.json"}
+    restored = []
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            for name in z.namelist():
+                base = pathlib.PurePosixPath(name).name
+                if base not in allowed or base != name:
+                    continue
+                atomic_write_bytes(BASE_DIR / base, z.read(name))
+                restored.append(base)
+    except zipfile.BadZipFile:
+        return JSONResponse({"error": "not a valid zip archive"}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    if not restored:
+        return JSONResponse({"error": "archive contained no known file"}, status_code=400)
+    _invalidate_cache()
+    if _cfg and "config.ini" in restored:
+        _cfg.read(CONFIG_FILE)
+    return {"restored": restored, "note": "restart NewGreedy to apply engine settings"}
+
+
+
 @app.get("/api/tracker_stats")
 async def api_tracker_stats():
     tc = _load_tracker_cumul()
@@ -354,11 +659,22 @@ async def api_tracker_stats():
     return result
 
 
+def _max_torrent_ratio() -> float:
+    if not _cfg:
+        return 3.0
+    try:
+        return float(_cfg.get("spoofing", "max_ratio_per_torrent", fallback="3.0"))
+    except Exception:
+        return 3.0
+
+
 @app.get("/api/health")
 async def api_health():
     data      = _load_stats()
     stalled   = [ih for ih, d in data.items() if d.get("stalled", False)]
-    anomalies = [ih for ih, d in data.items() if d.get("cumul_rep_ul", 0) < d.get("prev_rep_ul", 0)]
+    anomalies = [ih for ih, d in data.items()
+                 if d.get("cumul_rep_dl", 0) > 0
+                 and d.get("cumul_rep_ul", 0) / d["cumul_rep_dl"] > _max_torrent_ratio()]
     reached   = [ih for ih, d in data.items() if d.get("target_reached", False)]
     return {"total": len(data), "stalled": stalled, "anomalies": anomalies, "target_reached": reached}
 
@@ -435,8 +751,22 @@ async def api_history_single(ih: str):
 @app.delete("/api/logs")
 async def api_logs_clear():
     try:
-        with open(LOG_FILE, "w", encoding="utf-8"):
-            pass
+        ng = logging.getLogger("NewGreedy")
+        for h in list(ng.handlers):
+            base = getattr(h, "baseFilename", "")
+            if base and os.path.abspath(base) == os.path.abspath(str(LOG_FILE)):
+                h.acquire()
+                try:
+                    h.close()
+                    with open(LOG_FILE, "w", encoding="utf-8"):
+                        pass
+                    h.stream = h._open()
+                finally:
+                    h.release()
+                break
+        else:
+            with open(LOG_FILE, "w", encoding="utf-8"):
+                pass
         return {"status": "cleared"}
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -476,6 +806,9 @@ async def api_config_set(payload: dict = Body(...)):
     value = str(value).strip()
     if "\n" in value or "\r" in value:
         return JSONResponse({"error": "invalid value"}, status_code=400)
+    problem = _validate_value(key, value)
+    if problem:
+        return JSONResponse({"error": problem}, status_code=400)
     try:
         lines = CONFIG_FILE.read_text(encoding="utf-8").splitlines()
     except Exception as e:
@@ -560,7 +893,7 @@ async def api_stats_csv():
     for ih, d in data.items():
         ul    = d.get("cumul_rep_ul", 0) / 1e6
         dl    = d.get("cumul_rep_dl", 0) / 1e6
-        size  = d.get("estimated_size_mb", 0)
+        size  = (d.get("size_bytes", 0) or (dl * 1e6) or d.get("seed_fake_dl", 0)) / 1e6
         ratio = round(ul / dl, 4) if dl > 0 else ""
         mode  = "SEED" if dl == 0 else "DOWN"
         rows.append(
@@ -576,10 +909,10 @@ async def api_stats_csv():
 
 
 def _register_torrent(data: bytes, filename: str):
-    ih, size = _torrent_info(data)
+    ih, size = torrent_info(data)
     if not ih:
         raise ValueError("Could not extract info_hash")
-    trackers = _extract_trackers(data)
+    trackers = tracker_urls(data)
     udp = [u for u in trackers if u.lower().startswith("udp://")]
     ih_key = ih[:8]
     reg = _load_registry()
@@ -603,7 +936,10 @@ async def api_upload_torrent(file: UploadFile = File(...)):
                 {"error": f"file too large (max {MAX_UPLOAD_SIZE // (1024*1024)} MB)"},
                 status_code=413,
             )
-        ih, ih_key, size, udp = _register_torrent(data, file.filename or "")
+        try:
+            ih, ih_key, size, udp = _register_torrent(data, file.filename or "")
+        except (ValueError, IndexError) as e:
+            return JSONResponse({"error": f"not a readable .torrent file ({e})"}, status_code=400)
         return {
             "info_hash":       ih,
             "info_hash_short": ih_key,
@@ -615,52 +951,55 @@ async def api_upload_torrent(file: UploadFile = File(...)):
             "udp_warning":     bool(udp),
         }
     except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+        logger.warning("upload failed: %s", e)
+        return JSONResponse({"error": "could not process the uploaded file"}, status_code=500)
+
+
+def _select_for_purge(data, keep_active, inactive_hours):
+    cutoff = time.time() - inactive_hours * 3600 if inactive_hours > 0 else 0
+    out = []
+    for k, v in data.items():
+        if not VALID_HASH_RE.match(k) or not isinstance(v, dict):
+            continue
+        if not keep_active:
+            out.append(k)
+        elif v.get("target_reached", False) or (
+                cutoff > 0 and float(v.get("last_announce_ts", 0)) < cutoff):
+            out.append(k)
+    return out
+
+
+def _read_stats_raw():
+    try:
+        with open(STATS_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
 
 
 @app.get("/api/stats/purge")
 async def purge_stats_preview(keep_active: bool = True, inactive_hours: int = 0):
-    data = _read_stats_file()
-    cutoff = time.time() - inactive_hours * 3600 if inactive_hours > 0 else 0
-    if keep_active:
-        to_del = [k for k, v in data.items()
-                  if VALID_HASH_RE.match(k) and isinstance(v, dict) and (
-                      v.get("target_reached", False)
-                      or (cutoff > 0 and float(v.get("last_announce_ts", 0)) < cutoff)
-                  )]
-    else:
-        to_del = [k for k in data if VALID_HASH_RE.match(k) and isinstance(data[k], dict)]
-    return {"would_purge": len(to_del), "hashes": to_del, "keep_active": keep_active, "inactive_hours": inactive_hours}
+    to_del = _select_for_purge(_read_stats_file(), keep_active, inactive_hours)
+    return {"would_purge": len(to_del), "hashes": to_del,
+            "keep_active": keep_active, "inactive_hours": inactive_hours}
 
 
 @app.delete("/api/stats/purge")
 async def purge_stats(keep_active: bool = True, inactive_hours: int = 0):
-    try:
-        with open(STATS_FILE, encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
-        data = {}
+    data = _read_stats_raw()
     before = len([k for k in data if VALID_HASH_RE.match(k)])
-    cutoff = time.time() - inactive_hours * 3600 if inactive_hours > 0 else 0
-    if keep_active:
-        to_del = [k for k, v in data.items()
-                  if VALID_HASH_RE.match(k) and isinstance(v, dict) and (
-                      v.get("target_reached", False)
-                      or (cutoff > 0 and float(v.get("last_announce_ts", 0)) < cutoff)
-                  )]
-    else:
-        to_del = [k for k in data if VALID_HASH_RE.match(k) and isinstance(data[k], dict)]
+    to_del = _select_for_purge(data, keep_active, inactive_hours)
     for k in to_del:
         del data[k]
     try:
-        with open(STATS_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+        atomic_write_json(STATS_FILE, data)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
     _write_purge_pending(to_del)
     _invalidate_cache()
     after = len([k for k in data if VALID_HASH_RE.match(k)])
-    return {"purged": before - after, "remaining": after, "keep_active": keep_active, "inactive_hours": inactive_hours}
+    return {"purged": before - after, "remaining": after,
+            "keep_active": keep_active, "inactive_hours": inactive_hours}
 
 
 @app.delete("/api/stats/{ih}")
@@ -668,17 +1007,12 @@ async def delete_torrent_stat(ih: str):
     ih = ih[:8].lower()
     if not VALID_HASH_RE.match(ih):
         return JSONResponse({"error": "invalid hash"}, status_code=400)
-    try:
-        with open(STATS_FILE, encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
-        data = {}
+    data = _read_stats_raw()
     if ih not in data:
         return JSONResponse({"error": "not found"}, status_code=404)
     del data[ih]
     try:
-        with open(STATS_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+        atomic_write_json(STATS_FILE, data)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
     _write_purge_pending([ih])
@@ -744,7 +1078,9 @@ def _scan_watch_folder():
         folder.mkdir(parents=True, exist_ok=True)
     except Exception:
         return
+    present = set()
     for path in folder.glob("*.torrent"):
+        present.add(str(path))
         try:
             stat = path.stat()
             sig = (stat.st_mtime, stat.st_size)
@@ -764,6 +1100,8 @@ def _scan_watch_folder():
                                path.name, len(udp))
         except Exception as e:
             logger.debug("[WATCH] %s error: %s", path.name, e)
+    for gone in [k for k in _watch_seen if k not in present]:
+        del _watch_seen[gone]
 
 
 async def _watch_loop():
@@ -784,144 +1122,3 @@ async def serve_page(page: str):
     if not f.exists():
         return HTMLResponse(status_code=404, content=f"{page}.html not found in static/")
     return f.read_text(encoding="utf-8")
-
-
-def _torrent_info(raw: bytes):
-    marker = b"4:info"
-    idx = raw.find(marker)
-    if idx == -1:
-        raise ValueError("No info key in torrent file")
-    start = idx + len(marker)
-    pos   = start
-    depth = 0
-    while pos < len(raw):
-        c = raw[pos:pos + 1]
-        if c in (b"d", b"l"):
-            depth += 1
-            pos   += 1
-        elif c == b"i":
-            end = raw.index(b"e", pos + 1)
-            pos = end + 1
-        elif c == b"e":
-            depth -= 1
-            pos   += 1
-            if depth == 0:
-                break
-        elif c.isdigit():
-            p = pos
-            while raw[p:p + 1].isdigit():
-                p += 1
-            slen = int(raw[pos:p])
-            pos  = p + 1 + slen
-        else:
-            raise ValueError(f"Invalid bencode byte at pos {pos}: {c!r}")
-    info_bytes = raw[start:pos]
-    ih         = hashlib.sha1(info_bytes).hexdigest()
-    size       = _bencode_length(info_bytes)
-    return ih, size
-
-
-def _extract_trackers(raw: bytes):
-    urls = []
-    idx = raw.find(b"8:announce")
-    if idx != -1 and raw[idx + 10:idx + 11] != b"-":
-        try:
-            s, _ = _bd_str(raw, idx + 10)
-            urls.append(s.decode("utf-8", "replace"))
-        except Exception:
-            pass
-    idx = raw.find(b"13:announce-list")
-    if idx != -1:
-        pos = idx + 16
-        if raw[pos:pos + 1] == b"l":
-            pos += 1
-            depth = 1
-            while pos < len(raw) and depth > 0:
-                c = raw[pos:pos + 1]
-                if c == b"l":
-                    depth += 1
-                    pos += 1
-                elif c == b"e":
-                    depth -= 1
-                    pos += 1
-                elif c.isdigit():
-                    try:
-                        s, pos = _bd_str(raw, pos)
-                        urls.append(s.decode("utf-8", "replace"))
-                    except Exception:
-                        break
-                else:
-                    break
-    clean = []
-    for u in urls:
-        u = u.strip()
-        if u and u not in clean and ("://" in u):
-            clean.append(u)
-    return clean
-
-
-def _bencode_length(info: bytes) -> int:
-    length_val = _bencode_get_int_key(info, b"length")
-    if length_val >= 0:
-        return length_val
-    total = 0
-    files_start = info.find(b"5:filesl")
-    if files_start == -1:
-        return 0
-    pos = files_start + len(b"5:filesl")
-    while pos < len(info) and info[pos:pos + 1] == b"d":
-        pos += 1
-        while pos < len(info) and info[pos:pos + 1] != b"e":
-            key, pos = _bd_str(info, pos)
-            if key == b"length":
-                n, pos = _bd_int(info, pos)
-                total += n
-            else:
-                pos = _bd_skip(info, pos)
-        pos += 1
-    return total
-
-
-def _bd_str(data, pos):
-    p = pos
-    while data[p:p + 1].isdigit():
-        p += 1
-    slen = int(data[pos:p])
-    return data[p + 1:p + 1 + slen], p + 1 + slen
-
-
-def _bd_int(data, pos):
-    end = data.index(b"e", pos + 1)
-    return int(data[pos + 1:end]), end + 1
-
-
-def _bd_skip(data, pos):
-    c = data[pos:pos + 1]
-    if c == b"i":
-        end = data.index(b"e", pos + 1)
-        return end + 1
-    elif c in (b"d", b"l"):
-        pos += 1
-        while data[pos:pos + 1] != b"e":
-            pos = _bd_skip(data, pos)
-        return pos + 1
-    elif c.isdigit():
-        p = pos
-        while data[p:p + 1].isdigit():
-            p += 1
-        slen = int(data[pos:p])
-        return p + 1 + slen
-    return pos + 1
-
-
-def _bencode_get_int_key(data: bytes, key: bytes) -> int:
-    try:
-        marker = str(len(key)).encode() + b":" + key + b"i"
-        idx = data.find(marker)
-        if idx == -1:
-            return -1
-        idx += len(marker)
-        end = data.index(b"e", idx)
-        return int(data[idx:end])
-    except Exception:
-        return -1

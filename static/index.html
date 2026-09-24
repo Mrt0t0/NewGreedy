@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>NewGreedy — Dashboard</title>
-<link rel="stylesheet" href="/static/style.css?v=1.7.6">
+<link rel="stylesheet" href="/static/style.css?v=1.7.7">
 </head>
 <body>
 <nav>
@@ -34,6 +34,7 @@
   <div class="card"><div class="clbl">Total UL</div><div class="cval" id="c_ul">—</div></div>
   <div class="card"><div class="clbl">Total DL</div><div class="cval" id="c_dl">—</div></div>
 </div>
+<div id="dry_warn" style="display:none;margin-bottom:14px"></div>
 <div id="udp_warn" style="display:none;margin-bottom:14px"></div>
 <div id="tracker_warn" style="display:none;margin-bottom:14px"></div>
 <div class="toolbar">
@@ -57,7 +58,7 @@
 <div class="ts" id="ts" style="margin-top:8px"></div>
 
 </main>
-<script src="/static/app.js?v=1.7.6"></script>
+<script src="/static/app.js?v=1.7.7"></script>
 <script>
 if (typeof ngUrl !== 'function') {
   document.addEventListener('DOMContentLoaded', function () {
@@ -132,6 +133,15 @@ function load(){
   .catch(e=>{
     document.getElementById('tbody').innerHTML='<tr><td colspan="9" style="text-align:center;padding:20px;color:var(--er)">API error: '+e.message+'</td></tr>';
   });
+  API.get('/api/config').then(c=>{
+    var on=((c.simulation||{}).dry_run||'false').toString().toLowerCase()==='true';
+    var w=document.getElementById('dry_warn');
+    if(!on){w.style.display='none';return;}
+    w.style.display='block';
+    w.innerHTML='<div style="background:rgba(163,113,247,.1);border:1px solid var(--tg);border-radius:var(--r);padding:10px 14px;font-size:13px;color:var(--tg)">'
+      +'🧪 <b>Simulation mode</b> — announces are computed and logged but left unmodified. '
+      +'Set <span class="ic">dry_run = false</span> to inject for real.</div>';
+  }).catch(()=>{});
   fetch(ngUrl('/api/udp_status')).then(r=>r.json()).then(u=>{
     var w=document.getElementById('udp_warn');
     if(!u.udp_detected){w.style.display='none';return;}

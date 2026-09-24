@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>NewGreedy — Config</title>
-<link rel="stylesheet" href="/static/style.css?v=1.7.6">
+<link rel="stylesheet" href="/static/style.css?v=1.7.7">
 </head>
 <body>
 <nav>
@@ -53,6 +53,30 @@
   </div>
 </div>
 <div class="sec">
+  <div class="sec-t">🎭 Emulated client profiles</div>
+  <div class="twrap"><table>
+    <thead><tr><th>Profile</th><th>User agents</th><th>numwant</th></tr></thead>
+    <tbody id="profbody"><tr><td colspan="3" class="muted" style="padding:14px">Loading…</td></tr></tbody>
+  </table></div>
+  <div class="muted" style="font-size:12px;margin-top:8px">
+    Set <span class="ic">client_profile</span> in the section above. Each profile defines its own
+    peer_id prefixes, header set and announce parameter order.
+  </div>
+</div>
+<div class="sec">
+  <div class="sec-t">💾 Backup &amp; restore</div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+    <button class="btn pri" onclick="window.open(ngUrl('/api/backup'),'_blank')">⬇ Download backup</button>
+    <button class="btn" onclick="document.getElementById('rup').click()">⬆ Restore archive</button>
+    <input type="file" id="rup" accept=".zip" style="display:none" onchange="restoreFiles(this.files)">
+  </div>
+  <div class="muted" style="font-size:12px;margin-top:8px">
+    The archive contains config.ini, stats.json, torrent_registry.json and control.json.
+    Restoring overwrites them — restart NewGreedy afterwards.
+  </div>
+  <div class="alert hid" id="bkalert"></div>
+</div>
+<div class="sec">
   <div class="sec-t">📤 Upload .torrent — pre-register</div>
   <div class="upzone"
        onclick="document.getElementById('fup').click()"
@@ -68,7 +92,7 @@
 </div>
 
 </main>
-<script src="/static/app.js?v=1.7.6"></script>
+<script src="/static/app.js?v=1.7.7"></script>
 <script>
 if (typeof ngUrl !== 'function') {
   document.addEventListener('DOMContentLoaded', function () {
@@ -133,8 +157,28 @@ function saveKey(){
     loadCfg(); loadEditable();
   }).catch(function(e){sa('editalert','Error: '+e.message,'er');});
 }
+function loadProfiles(){
+  API.get('/api/profiles').then(p=>{
+    var rows=Object.entries(p).map(([k,v])=>
+      '<tr><td class="mono">'+k+'</td><td class="muted" style="white-space:normal">'
+      +v.user_agents.join('<br>')+'</td><td class="mono muted">'+v.numwant+'</td></tr>').join('');
+    document.getElementById('profbody').innerHTML=rows||'<tr><td colspan="3" class="muted">None</td></tr>';
+  }).catch(()=>{});
+}
+function restoreFiles(files){
+  if(!files||!files.length) return;
+  var fd=new FormData(); fd.append('file',files[0]);
+  fetch(ngUrl('/api/restore'),{method:'POST',body:fd}).then(r=>r.json())
+    .then(d=>{
+      if(d.error){sa('bkalert','✗ '+d.error,'er');return;}
+      sa('bkalert','✓ Restored: '+d.restored.join(', ')+' — restart NewGreedy to apply','ok');
+      loadCfg(); loadEditable();
+    })
+    .catch(e=>sa('bkalert','✗ '+e.message,'er'));
+}
 loadCfg();
 loadEditable();
+loadProfiles();
 
 initUI('config');
 </script>

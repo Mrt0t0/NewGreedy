@@ -1,4 +1,4 @@
-// NewGreedy v1.7.6 — shared front-end helpers
+// NewGreedy v1.7.7 — shared front-end helpers
 // Loaded by every page via <script src="app.js"></script>
 
 // Base path: supports an obfuscated prefix (web_path_prefix) and a secret token.

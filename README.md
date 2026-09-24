@@ -4,7 +4,7 @@
 
 ### BitTorrent announce proxy — Upload ratio spoofer
 
-[![Version](https://img.shields.io/badge/version-1.7.6-blue?style=flat-square)](https://github.com/Mrt0t0/NewGreedy/releases)
+[![Version](https://img.shields.io/badge/version-1.7.7-blue?style=flat-square)](https://github.com/Mrt0t0/NewGreedy/releases)
 [![Python](https://img.shields.io/badge/python-3.9%2B-green?style=flat-square)](https://python.org)
 [![License](https://img.shields.io/badge/license-GPLv3-gray?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows%20%7C%20Docker-lightgray?style=flat-square)](https://github.com/Mrt0t0/NewGreedy)
@@ -22,9 +22,11 @@
 ## Contents
 
 - [What does NewGreedy do?](#what-does-newgreedy-do)
+- [Features](#features)
 - [How it works](#how-it-works)
 - [Requirements](#requirements)
 - [Installation](#installation) — [Linux](#linux) · [macOS](#macos) · [Windows](#windows) · [Docker](#docker)
+- [Updating](#updating)
 - [Configure your torrent client](#configure-your-torrent-client)
 - [Configuration reference](#configuration-reference)
 - [Web UI](#web-ui)
@@ -40,9 +42,43 @@
 ## What does NewGreedy do?
 
 NewGreedy is a **local HTTP/HTTPS proxy** that sits between your torrent client and the tracker.
-Every time your client sends an announce, NewGreedy intercepts it and rewrites the `uploaded`, `downloaded`, `peer_id`, and `port` fields before forwarding the request.
+Every time your client sends an announce, NewGreedy intercepts it and rewrites the `uploaded`, `downloaded`, `left`, `peer_id` and `port` fields before forwarding the request, as one consistent client that behaves the way the real one would.
 
 Your torrent client and the files on disk are **never touched**. Only the statistics reported to trackers change.
+
+---
+
+## Features
+
+**Ratio engine**
+- Brings each torrent to `target_ratio` with a non-linear catch-up, random noise and deliberate pauses, then stops
+- Caps per torrent (`max_ratio_per_torrent`) and per tracker across all torrents (`max_global_ratio_per_tracker`)
+- Credits upload to pure seeders, and holds back when the tracker reports no leecher
+- One upload budget shared by every torrent, with active hours and a smooth day/night curve
+
+**Looking like a real client**
+- One identity per session — peer_id, port, `key`, User-Agent, headers and parameter order of a real qBittorrent, Transmission, Deluge, libtorrent or rTorrent build
+- Carried across restarts the way a real install behaves: same client, fresh peer_id, occasional version upgrade
+- Announces spread per torrent, a gradual start after a restart, tracker intervals only ever lengthened
+- `downloaded` and `left` always consistent with the torrent size; `trackerid` returned; scrapes forwarded
+
+**Control**
+- Pause, ratio override and tags per torrent, applied within seconds without a restart
+- `[tracker:domain]` sections to set different rules for one tracker
+- Watch folder: drop `.torrent` files to register their name, size and trackers
+- Dry-run mode that logs every decision without changing a single announce
+
+**Web UI and integrations**
+- Dashboard, sortable torrents table, ratio charts, live logs and settings editor
+- REST API and Prometheus `/metrics`
+- Webhooks to Discord, Slack or any JSON endpoint
+- Upstream proxy such as Gluetun; optional access token, hidden path and rate limiting
+
+**Operations**
+- Installers for Linux (systemd), macOS (launchd) and Windows (Task Scheduler), plus Docker
+- Update from the command line or in one click from the web UI — settings merged, data kept
+- Backup and restore archive, atomic writes, log rotation, clean flush on shutdown
+- UDP trackers detected and flagged, since their announces bypass the proxy
 
 ---
 
@@ -52,11 +88,26 @@ Your torrent client and the files on disk are **never touched**. Only the statis
 Torrent client  ──► NewGreedy :3456 (proxy)  ──► Tracker
                          │
                          ├─ Intercepts announces (HTTP + HTTPS via mitmproxy)
-                         ├─ Rewrites: uploaded / downloaded / peer_id / port / numwant
+                         ├─ Rewrites: uploaded / downloaded / left / peer_id / port
+                         │            numwant / key / trackerid
                          ├─ Applies ratio engine (non-linear progression, noise, stagnation)
                          ├─ Guards per-tracker global ratio cap
+                         ├─ Keeps downloaded + left = size, and left falling at a real speed
+                         ├─ Spreads announce timing across torrents (see below)
                          └─ Forwards patched request to tracker
 ```
+
+**Announce timing:**
+```
+tracker interval  ──► + per-torrent offset (stable, derived from infohash + session)
+                      + slow hourly drift
+                      + extra spread when several torrents cluster on one tracker
+                      ──► rewritten in the tracker reply, later only, never earlier
+```
+
+Torrents that start together at launch would otherwise keep announcing together forever.
+Each one gets its own period, so the group fans out over the first hours and the tracker
+sees a natural, uncorrelated stream instead of a repeating burst.
 
 **Upload calculation per torrent:**
 ```
@@ -124,10 +175,7 @@ The CA is automatically added to the OS trust store. For browsers with their own
 - File: `/usr/local/share/ca-certificates/mitmproxy-ca.crt`
 - Firefox → Settings → Privacy & Security → Certificates → View Certificates → Import
 
-**Update an existing install:**
-```bash
-sudo ./install.sh --update
-```
+Keep the cloned folder: updates are run from it — see [Updating](#updating).
 
 **Uninstall:**
 ```bash
@@ -173,9 +221,10 @@ launchctl load   ~/Library/LaunchAgents/com.mrt0t0.newgreedy.plist   # start
 tail -f "$HOME/Library/Application Support/NewGreedy/newgreedy.log"
 ```
 
-**Update / uninstall:**
+Keep the cloned folder: updates are run from it — see [Updating](#updating).
+
+**Uninstall:**
 ```bash
-./install-macos.sh --update
 ./install-macos.sh --uninstall
 ```
 
@@ -210,10 +259,7 @@ Open `http://localhost:8080` in your browser. The proxy listens on `127.0.0.1:34
 Firefox → Settings → Privacy & Security → Certificates → Import
 File: `%USERPROFILE%\.mitmproxy\mitmproxy-ca-cert.p12`
 
-**Update:**
-```powershell
-powershell -ExecutionPolicy Bypass -File .\install.ps1 -Update
-```
+Keep the folder you installed from: updates are run from it — see [Updating](#updating).
 
 **Uninstall:**
 ```powershell
@@ -228,6 +274,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall
 
 ```bash
 touch stats.json torrent_registry.json newgreedy.log
+echo '{}' > control.json
 ```
 
 **2. Start the stack**
@@ -250,11 +297,7 @@ docker exec newgreedy cat /root/.mitmproxy/mitmproxy-ca-cert.pem > mitmproxy-ca.
 
 Import `mitmproxy-ca.crt` into your OS or browser trust store, then restart your torrent client.
 
-**Update:**
-```bash
-docker compose pull
-docker compose up -d --build
-```
+Updates are run from this folder — see [Updating](#updating).
 
 ---
 
@@ -266,6 +309,116 @@ cd NewGreedy
 pip install -r requirements.txt
 python3 newgreedy.py
 ```
+
+Updates: see [Updating](#updating).
+
+---
+
+## Updating
+
+Every method keeps your data — `stats.json`, `torrent_registry.json`, `control.json`, `torrents/` — and **merges** `config.ini`: your values stay, and the settings a new version adds are inserted with their comments.
+
+| Install | Command-line update | Web button |
+|---|---|---|
+| Linux | `git pull`, then `sudo ./install.sh --update` | ✅ restarts on its own |
+| macOS | `git pull`, then `./install-macos.sh --update` | ✅ restarts on its own |
+| Windows | `git pull`, then `.\install.ps1 -Update` | ✅ start it again if it does not come back |
+| Docker | save `config.ini`, `git pull`, merge, rebuild | ⚠️ lasts until the container is rebuilt |
+| Manual | save `config.ini`, `git pull`, merge, restart | ✅ start NewGreedy again afterwards |
+
+**Coming from v1.7.6:** it has no update button — use the command line once. The button is available from v1.7.7 on.
+
+### Linux
+
+```bash
+cd ~/NewGreedy                 # the folder you installed from
+git pull                       # or extract the new release zip over it
+sudo ./install.sh --update
+```
+
+The installer replaces the program files in `/opt/newgreedy`, merges `config.ini`, and restarts the service. Follow it with `journalctl -u newgreedy -f`.
+
+v1.7.6 copied its `.git/` folder into `/opt/newgreedy`. It is not used; `sudo rm -rf /opt/newgreedy/.git` removes it.
+
+### macOS
+
+```bash
+cd ~/NewGreedy
+git pull
+./install-macos.sh --update
+```
+
+No `sudo`. Files in `~/Library/Application Support/NewGreedy` are updated and the launchd agent is reloaded.
+
+### Windows
+
+In PowerShell, from the folder you installed from:
+
+```powershell
+git pull                       # or download and extract the new release zip
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Update
+```
+
+Files in `%LOCALAPPDATA%\NewGreedy` are updated and the scheduled task is restarted.
+
+### Docker
+
+`config.ini` is bind-mounted from the cloned folder, so it is also the file Git tracks: `git pull` refuses to run while it holds your settings. Set it aside, pull, merge it back, rebuild:
+
+```bash
+cd ~/NewGreedy
+cp config.ini config.ini.mine
+git checkout -- .
+git pull
+python3 config_merge.py --shipped config.ini --current config.ini.mine --out config.ini
+[ -f control.json ] || echo '{}' > control.json
+docker compose up -d --build
+```
+
+`git checkout -- .` discards changes to tracked files only — your settings are in `config.ini.mine`, and data files are not tracked. `control.json` is mounted since v1.7.7; if it is missing, Docker creates a directory in its place.
+
+Without `python3` on the host, run the merge in a throwaway container:
+`docker run --rm -v "$PWD:/w" -w /w python:3.11-slim python3 config_merge.py --shipped config.ini --current config.ini.mine --out config.ini`
+
+### Manual
+
+Stop NewGreedy (`Ctrl+C`), then:
+
+```bash
+cd ~/NewGreedy
+cp config.ini config.ini.mine
+git checkout -- .
+git pull
+pip install -r requirements.txt
+python3 config_merge.py --shipped config.ini --current config.ini.mine --out config.ini
+python3 newgreedy.py
+```
+
+### Web interface
+
+When a newer release exists, the Help page shows **Update now**:
+
+1. The release is downloaded from GitHub — the host is checked, and the SHA-256 too when the release notes publish one.
+2. Program files are copied to `.backup/`, then replaced.
+3. `config.ini` is merged; data files are not touched.
+4. **Restart to apply** stops NewGreedy so the new code loads.
+
+Any failure puts the previous files back; `POST /api/update/rollback` does the same by hand.
+
+What happens after **Restart to apply** depends on the install:
+
+| Install | After the restart | Keep in mind |
+|---|---|---|
+| Linux | systemd starts NewGreedy again | — |
+| macOS | launchd starts NewGreedy again | — |
+| Windows | NewGreedy stops | If it is not back within a minute: `Start-ScheduledTask -TaskName NewGreedy`, or log off and on |
+| Docker | the container restarts (`restart: unless-stopped`) | The new files live inside the container: rebuilding from an older clone brings the old version back. Update the clone as above before the next rebuild |
+| Manual | NewGreedy stops | Start it again with `python3 newgreedy.py`. The next `git pull` goes through the steps above |
+
+### Options
+
+- `--keep-scrape` (`-KeepScrape` on Windows) — `intercept_scrape` is the only value a merge changes on its own, from `true` to `false` (the v1.7.7 default). This keeps yours.
+- `python3 config_merge.py --shipped config.ini --current <your config.ini>` without `--out` shows what would change and writes nothing.
 
 ---
 
@@ -307,7 +460,7 @@ Changes are applied live via **Reload config.ini** in the Config page, or `SIGHU
 | Key | Default | Description |
 |---|---|---|
 | `listen_port` | `3456` | Port NewGreedy listens on. Must match the proxy port in your torrent client. |
-| `tracker_timeout` | `5` | Seconds before a tracker request times out. |
+| `tracker_timeout` | `5` | Reserved, not read. mitmproxy manages tracker connection timeouts itself. |
 
 ---
 
@@ -327,7 +480,8 @@ Changes are applied live via **Reload config.ini** in the Config page, or `SIGHU
 | `stagnation_probability` | `0.03` | Per-announce probability of deliberately skipping injection. |
 | `seed_credit_mb` | `5.0` | MB credited per announce for pure seeders. |
 | `seed_target_mb` | `500.0` | Total upload target for pure seeders (progress bar reference). |
-| `anti_clustering` | `true` | Jitter on announce timing. |
+| `seeding_dl_ratio` | `0.85` | Reserved, not read. |
+| `anti_clustering` | `true` | Legacy master switch for announce de-correlation. Superseded by `desync_announces`, which falls back to this value. |
 
 ---
 
@@ -335,18 +489,29 @@ Changes are applied live via **Reload config.ini** in the Config page, or `SIGHU
 
 | Key | Default | Description |
 |---|---|---|
-| `user_agent_mode` | `random` | `random`: rotate UA to match peer_id client. `fixed`: always use `user_agent_value`. |
-| `user_agent_value` | `qBittorrent/4.6.8` | Static UA, used when `user_agent_mode = fixed`. |
-| `spoof_user_agent` | `true` | Replace `User-Agent` header to match peer_id client. |
-| `spoof_peer_id` | `true` | Assign a stable randomised `peer_id` per torrent per session. |
-| `spoof_peers` | `true` | Randomise `numwant` ±`peer_variance`%. |
-| `peer_variance` | `0.15` | Variance factor for `numwant` randomisation. |
-| `spoof_port` | `true` | Assign a stable random port per torrent from `port_range`. |
+| `user_agent_mode` | `random` | `random`: send the User-Agent paired with the session `peer_id`. `fixed`: force `user_agent_value`, which breaks that pairing and is logged as a warning at startup. |
+| `user_agent_value` | `qBittorrent/5.1.0` | Static UA, used only when `user_agent_mode = fixed`. |
+| `spoof_user_agent` | `true` | Send the emulated client's User-Agent. `false` leaves your own client's header untouched. |
+| `spoof_peer_id` | `true` | Use one stable `peer_id` and `key` for the whole session, like a real client. |
+| `spoof_peers` | `true` | Send the `numwant` value of the emulated client instead of the real one. |
+| `peer_variance` | `0.15` | Reserved, not read. |
+| `spoof_port` | `true` | Use one stable listening port for the whole session, taken from `port_range`. |
 | `port_range` | `6881-6999` | Range for spoofed port selection. |
 | `spoof_headers` | `true` | Inject realistic `Accept` and `Accept-Language` headers. |
-| `intercept_scrape` | `true` | Silently drop scrape requests. |
+| `intercept_scrape` | `false` | Silently drop scrape requests. A client that never scrapes is atypical. |
+| `echo_trackerid` | `true` | Send back the `trackerid` a tracker hands out, as BEP 3 requires. |
 | `tracker_whitelist` | _(empty)_ | Comma-separated domains to process. Empty = all. |
 | `tracker_blacklist` | _(empty)_ | Comma-separated domains to skip. Takes precedence over whitelist. |
+| `desync_announces` | `true` | Give every torrent its own announce period so torrents sharing a tracker never stay in lockstep. |
+| `desync_spread_pct` | `0.18` | Maximum extra delay added to the tracker interval, as a fraction. Hard limit `0.45`. |
+| `desync_min_gap` | `45` | Two announces to the same tracker closer than this count as a cluster and widen the spread. |
+| `startup_burst` | `true` | Ramp the injected upload up over the first minutes instead of running at full speed from the first announce. |
+| `startup_burst_window` | `300` | Length of that startup window, in seconds. |
+| `startup_ramp_floor` | `0.15` | Upload multiplier at the very beginning of the window. |
+
+The announce interval is only ever pushed **later**, never earlier, so NewGreedy can never
+make your client announce more often than the tracker allows. A `min interval` larger than
+`interval` is left untouched.
 
 ---
 
@@ -354,7 +519,7 @@ Changes are applied live via **Reload config.ini** in the Config page, or `SIGHU
 
 | Key | Default | Description |
 |---|---|---|
-| `ssl_verify_trackers` | `true` | Verify tracker SSL certificates. |
+| `ssl_verify_trackers` | `true` | Reserved, not read. Certificate handling follows mitmproxy's own settings. |
 
 ---
 
@@ -364,6 +529,7 @@ Changes are applied live via **Reload config.ini** in the Config page, or `SIGHU
 |---|---|---|
 | `persist_stats` | `true` | Save stats to `stats.json`. Flushed at most once per 60 s; forced on stop. |
 | `auto_purge_stopped` | `true` | Remove torrent from stats on `event=stopped`. |
+| `stopped_purge_delay` | `120` | Seconds before a torrent that sent `event=stopped` is dropped. A client that comes back in time keeps its counters. `0` = immediate. |
 | `tracker_cumul_ttl_days` | `30` | Days before an inactive tracker domain is dropped from the cumulative ratio. |
 
 ---
@@ -394,10 +560,80 @@ Changes are applied live via **Reload config.ini** in the Config page, or `SIGHU
 | `stall_announce_threshold` | `8` | Consecutive zero-DL announces before `[STALL_NET]` is flagged. |
 | `min_announces_before_stagnation` | `10` | Minimum announces before stagnation can trigger. |
 | `log_level` | `INFO` | Verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR`. |
-| `event_anomaly_probability` | `0.03` | Probability of injecting a fake `event=started`. |
+| `event_anomaly_probability` | `0.03` | Reserved, not read. A fake `event=started` contradicts a growing upload counter. |
 | `corrupt_field_probability` | `0.05` | Probability of adding a `corrupt=` field. |
 | `respect_tracker_interval` | `true` | Pace announces using the `interval` returned by the tracker when available. |
+| `multi_tracker_delay_min` | `0.5` | Reserved, not read. |
+| `multi_tracker_delay_max` | `8.0` | Reserved, not read. |
 | `watch_folder` | `torrents` | Folder scanned every 15 s for new `.torrent` files. Empty disables auto-import. |
+
+---
+
+### [client]
+
+| Key | Default | Description |
+|---|---|---|
+| `client_profile` | `random` | Emulated client: `qbittorrent`, `transmission`, `deluge`, `libtorrent`, `rtorrent` or `random`. Each profile pairs every peer_id prefix with the User-Agent of that exact version, and carries its own header set, default `numwant` and announce parameter order. |
+| `rotate_profile_on_restart` | `true` | Legacy switch, read only when `session_identity` is empty (`true` = `rotate`, `false` = `stable`). |
+| `session_identity` | `drift` | What survives a restart. `stable`: everything. `drift`: same client and port, fresh peer_id tail. `rotate`: a new client each time. |
+| `version_bump_probability` | `0.10` | In `drift` mode, chance per start of moving up one release of the same client. |
+
+---
+
+### [bandwidth]
+
+| Key | Default | Description |
+|---|---|---|
+| `global_max_speed_mbps` | `8.0` | Upload ceiling shared by every torrent, in MB/s. Models a single machine's uplink instead of letting each torrent inject independently. `0` disables. |
+| `per_torrent_speed_cap_mbps` | `12.0` | Hard ceiling for the implicit speed of a single announce (`ΔUL / Δt`). |
+| `max_download_speed_mbps` | `12.0` | Pace for the download NewGreedy reports beyond what your client reports, so `left` falls at a credible speed. `0` disables. |
+| `circadian_smoothing` | `true` | Ramp injection up and down across `inject_hours` instead of switching on and off abruptly. |
+| `circadian_night_factor` | `0.35` | Upload multiplier applied at the quietest point of the cycle. |
+
+---
+
+### [notifications]
+
+| Key | Default | Description |
+|---|---|---|
+| `webhook_url` | _(empty)_ | Destination URL. Empty disables notifications. |
+| `webhook_format` | `generic` | `generic` (plain JSON), `discord` or `slack`. |
+| `webhook_events` | `target_reached,tracker_down,global_cap` | Subscribed events among `target_reached`, `tracker_down`, `tracker_up`, `global_cap`, `purged`. Identical alerts are de-duplicated within a 5-minute window. |
+
+---
+
+### [upstream]
+
+| Key | Default | Description |
+|---|---|---|
+| `proxy_url` | _(empty)_ | Forward tracker announces through an external proxy, e.g. `http://gluetun:8888`. |
+| `proxy_bypass` | _(empty)_ | Comma-separated domains that must not go through the upstream proxy. |
+
+---
+
+### [simulation]
+
+| Key | Default | Description |
+|---|---|---|
+| `dry_run` | `false` | Compute and log everything without touching a single announce. Useful to validate a configuration before injecting for real. A banner appears on the dashboard while enabled. |
+
+---
+
+### Per-tracker overrides
+
+Any `[tracker:domain]` section overrides the global settings for that domain only:
+
+```ini
+[tracker:private.example.org]
+target_ratio                 = 1.05
+max_global_ratio_per_tracker = 1.20
+catch_up_factor              = 0.10
+
+[tracker:open.example.com]
+target_ratio                 = 2.50
+```
+
+Useful when a private tracker requires a modest ratio while another tolerates more.
 
 ---
 
@@ -406,11 +642,11 @@ Changes are applied live via **Reload config.ini** in the Config page, or `SIGHU
 | Page | URL | Description |
 |---|---|---|
 | Dashboard | `/` | Summary cards, tracker cap warning banner, auto-refresh every 15 s |
-| Torrents | `/torrents` | Full table — name, Real DL/UL, Injected UL, Ratio, ETA, Trackers, Last seen, purge |
-| Charts | `/charts` | Time-series UL and ratio per torrent |
-| Config | `/config` | View settings, edit an allow-listed setting, `.torrent` import |
+| Torrents | `/torrents` | Sortable, searchable table with per-torrent pause, ratio override and tags |
+| Charts | `/charts` | Time-series per torrent, plus a compare mode overlaying several ratio curves |
+| Config | `/config` | View and edit settings, client profiles, backup/restore, `.torrent` import |
 | Logs | `/logs` | Live log stream, level filters, tracker ratio bar, GLOBAL_CAP counter |
-| Help | `/help` | Log field reference, API docs, qBittorrent setup, update check |
+| Help | `/help` | Log reference, API docs, qBittorrent setup, one-click update |
 
 ---
 
@@ -428,6 +664,17 @@ Changes are applied live via **Reload config.ini** in the Config page, or `SIGHU
 | `/api/registry` | GET | Imported torrents: name, size, tracker list |
 | `/api/config/editable` | GET | Settings that can be changed from the UI |
 | `/api/config/set` | POST | Update one setting in `config.ini` |
+| `/api/control` | GET | Paused torrents, ratio overrides and tags |
+| `/api/control/pause` | POST | Pause or resume injection for one torrent |
+| `/api/control/override` | POST | Force a target ratio or an upload total |
+| `/api/control/tags` | POST | Assign tags to a torrent |
+| `/api/profiles` | GET | Available emulated client profiles |
+| `/api/backup` | GET | Download a zip with config, stats, registry and control file |
+| `/api/restore` | POST | Restore a backup archive |
+| `/api/update/status` | GET | Current version, update progress, pending restart |
+| `/api/update/start` | POST | Download the latest release and replace program files |
+| `/api/update/rollback` | POST | Restore the files saved before the last update |
+| `/api/restart` | POST | Restart the service so new files take effect |
 | `/metrics` | GET | Prometheus metrics |
 | `/api/logs` | DELETE | Truncate `newgreedy.log` on the server |
 | `/api/health` | GET | Stalled, anomalous, and target-reached torrents |
@@ -462,6 +709,8 @@ GET    /api/tracker_stats                                     # per-domain ratio
 [DOWN] 99887766 | DL:  800.0M UL:  640.0M +   0.0M R:0.80 ETA:~12a #9 [STAG]
 [SEED] abcdef12 | UL:  312.4M +  18.2M #23
 [DOWN] 11223344 | DL: 1200.0M UL: 1960.0M +   0.1M R:1.63 ETA:~0a #41 [TARGET_REACHED]
+[SEED] 44556677 | UL:   41.8M +   6.2M #2 [BURST]
+[DOWN] 11223344 | DL:  600.0M UL:  480.0M +  12.7M R:0.80 ETA:~21a #7 [DESYNC]
 [GLOBAL_CAP] tracker.opentrackr.org | tracker_ratio capped → UL adjusted to 1280.0M
 [TRACKER_DOWN] tracker.openbittorrent.com — 3 consecutive errors, entering backoff
 [TRACKER_UP] tracker.openbittorrent.com — recovered
@@ -488,7 +737,18 @@ GET    /api/tracker_stats                                     # per-domain ratio
 | `[UDP_BYPASS]` | UDP tracker detected — its announces are **not** intercepted |
 | `[WATCH]` | Torrent auto-imported from the watch folder |
 | `[CUMUL_PURGE]` | Inactive tracker domain dropped from the cumulative ratio |
+| `[CUMUL_RESET]` | Per-tracker totals written before v1.7.7 were dropped at startup — they were over-counted and cannot be corrected after the fact |
 | `[PURGE_SYNC]` | Torrent removed from memory after a purge from the web UI |
+| `[PAUSED]` | Injection suspended for this torrent |
+| `[DRY-RUN]` | Simulation mode — the announce was left untouched |
+| `[BURST]` | Startup window — upload is still ramping up |
+| `[DESYNC]` | Another torrent announced to the same tracker within `desync_min_gap`; the spread was widened |
+| `[IDENTITY]` | Client profile rotated at startup |
+| `[CONTROL]` | Pause, override or tag file reloaded |
+| `[STOPPED]` | The client sent `event=stopped`; the torrent is retired once `stopped_purge_delay` has passed |
+| `[RESUMED]` | It announced again before that delay — the purge was cancelled and the counters kept |
+| `[DL_CAP]` | The reported download was held back to keep `left` falling at a plausible speed |
+| `[TRACKERID]` | A tracker issued a `trackerid`; it is echoed from the next announce on (debug level) |
 
 ---
 
@@ -496,6 +756,10 @@ GET    /api/tracker_stats                                     # per-domain ratio
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
+| New settings missing from the Config page | `config.ini` was kept as is by an older installer | Run `sudo ./install.sh --update` again from v1.7.7 |
+| `git pull` refuses: *local changes to config.ini* | Docker or manual install: your settings live in the tracked file | See [Updating](#updating) — set it aside, pull, merge it back |
+| `peer_id` changes at every restart | `session_identity = drift` redraws its random part, as a real client does | Expected. `stable` freezes it |
+| `[CUMUL_RESET]` once after upgrading, tracker totals at zero | Totals from v1.7.6 were over-counted and are discarded | Expected. They rebuild from real figures |
 | Ratio on tracker exceeds `max_global_ratio` | Pre-v1.7.5: cap was computed after accumulation | Upgrade to v1.7.5 — fixed by correct ordering |
 | Ratio cap resets after restart | Pre-v1.7.5: `_tracker_cumul` not persisted | Upgrade to v1.7.5 — now saved in `stats.json` |
 | `[STAG][STALL_ALGO][TARGET_REACHED]` together | Pre-v1.7.5: stagnation ran after target check | Upgrade to v1.7.5 — `_calc_upload` short-circuits on target |
@@ -522,11 +786,15 @@ GET    /api/tracker_stats                                     # per-domain ratio
 | File | Role |
 |---|---|
 | `newgreedy.py` | Launcher — watchdog, update check, web UI thread |
-| `_version.py` | Shared version constants and GitHub release check |
+| `_version.py` | Shared constants: version check, bencode reader, webhook delivery |
+| `client_profiles.py` | Emulated client definitions — peer_id, headers, parameter order |
+| `updater.py` | Downloads a GitHub release, swaps program files, keeps a rollback copy |
+| `config_merge.py` | Brings an existing `config.ini` up to the shipped one without losing a setting; used by every installer and by the one-click update |
+| `control.json` | Paused torrents, ratio overrides and tags — written by the web UI |
 | `newgreedy_addon.py` | mitmproxy addon — intercepts announces, ratio engine, stats, backoff |
 | `newgreedy_web.py` | FastAPI app — web UI and REST API |
 | `config.ini` | Main configuration file |
-| `stats.json` | Persisted stats (schema v5) — includes `_tracker_cumul` and per-torrent identity |
+| `stats.json` | Persisted stats (schema v7) — includes `_tracker_cumul`, the session identity, reported progress and stored tracker ids |
 | `torrent_registry.json` | Infohash, size, name and tracker list from `.torrent` imports |
 | `torrents/` | Watch folder — drop `.torrent` files here for auto-import |
 | `newgreedy.log` | Log file (streamed live in Logs page) |
@@ -537,6 +805,7 @@ GET    /api/tracker_stats                                     # per-domain ratio
 | `uninstall.sh` | Uninstaller — Linux / macOS |
 | `requirements.txt` | Python dependencies |
 | `LICENSE` | GNU General Public License v3.0 |
+| `.gitignore` | Excludes runtime data (`stats.json`, logs, `.torrent` files) from Git |
 | `Dockerfile` | Docker image |
 | `docker-compose.yml` | Docker Compose stack |
 
@@ -570,6 +839,30 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 ## Changelog
 
+### v1.7.7
+
+| | v1.7.6 | v1.7.7 |
+|---|---|---|
+| Client identity | One peer_id, port and client per torrent | One identity for the whole session; 5 client profiles, peer_id always matching the User-Agent |
+| Across restarts | Frozen for ever | `drift`: same client and port, fresh peer_id, occasional version bump |
+| Announce timing | Independent jitter, torrents stay in lockstep | Per-torrent offset, torrents restarted together fan out |
+| Startup | Full rate from the first announce | Upload ramps up over the first minutes |
+| `downloaded` / `left` | `left` passed through untouched | `downloaded + left = size`, credible download speed |
+| `numwant` / `event` | Randomised / fake `started` injected | Stable profile value / never altered |
+| `trackerid` | Not returned | Returned, as BEP 3 requires |
+| `event=stopped` | Forwarded unmodified, torrent dropped at once | Rewritten; removal deferred and batched |
+| Scrapes | Dropped by default | Forwarded |
+| Aggregate tracker cap | Download over-counted, cap fading over time | Counts real download |
+| Bandwidth | Per torrent, on/off active hours | Shared uplink budget, smooth day/night curve |
+| Control | — | Pause, ratio override and tags per torrent; `[tracker:domain]` overrides |
+| Integrations | — | Webhooks (Discord, Slack, JSON), upstream proxy, `dry_run` |
+| Backup | — | Backup / restore archive from the Config page |
+| Update | `install.sh --update`, `config.ini` kept as is | Same command, `config.ini` merged; one-click update from the web UI |
+| `config.ini` | 7 sections, 50 keys | 12 sections, 73 keys |
+| Python files | 4 | 7 — `client_profiles.py`, `updater.py`, `config_merge.py` added |
+
+- **Upgrading** — per-tracker totals written by v1.7.6 are discarded once (`[CUMUL_RESET]`), and `intercept_scrape` moves to `false`; everything else in `config.ini` is kept
+
 ### v1.7.6
 - **Anti-detection** — persistent `peer_id`/`port`/`key`, tracker-provided announce interval, `key` spoofing
 - **UDP awareness** — `udp://` trackers detected, logged as `[UDP_BYPASS]` and flagged in the UI (they bypass the proxy)
@@ -579,7 +872,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 - **Performance** — config parsed once with `__slots__`, unified read cache, cached GitHub version check, shared `_version.py` module
 - **Fixes** — log stream survives truncation/rotation, rate limiting restricted to API routes, WebSocket back-off, versioned static assets, `bcrypt<5` pinned
 - **Platforms** — dedicated macOS installer (launchd), config and stats preserved on update for all installers
-- **Verification** — pytest suite (18 tests), GitHub Actions CI (lint + test + Docker smoke test), pinned dependencies
+- **Dependencies** — version bounds pinned in `requirements.txt`
 - **License** — project relicensed under GNU GPL v3.0
 
 ### v1.7.5
@@ -618,219 +911,48 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 ### v1.7.6
 
-#### Anti-detection
+**Anti-detection**
+- `peer_id`, port and `key` kept per torrent across restarts, instead of a new identity at every start
+- Announces paced by the interval the tracker returns (`respect_tracker_interval`)
+- UDP trackers detected at import and flagged: their announces bypass the proxy and report real figures
 
-**Stable identity across restarts**
-`peer_id`, `port` and the announce `key` are now generated once per torrent and persisted in `stats.json` (schema v5). Before this, every restart made each torrent announce with a brand-new identity to the same tracker — an easily detectable pattern.
+**Security**
+- Optional access token and hidden path for the web UI (`web_secret_token`, `web_path_prefix`)
+- Per-IP rate limiting on the API (`web_rate_limit`); secrets masked in API responses
+- 10 MB upload limit and sanitised file names for `.torrent` imports
 
-**`key` parameter spoofing**
-The BitTorrent `key` field is now set to a stable per-torrent value instead of being passed through untouched.
+**Robustness**
+- Stats flushed on `SIGTERM`/`SIGINT`, so `systemctl stop` and `docker stop` lose nothing
+- Atomic writes for `stats.json`, log rotation (10 MB × 3), hourly memory cleanup
+- History compressed beyond 24 h; inactive trackers dropped after `tracker_cumul_ttl_days`
+- Numeric settings validated at startup with an explicit warning
 
-**Tracker-provided announce interval**
-The `interval` returned by the tracker is parsed and stored per torrent/domain, then used to pace announces instead of always applying `min_announce_interval`. Disable with `respect_tracker_interval = false`.
+**Features**
+- Watch folder: `.torrent` files dropped in `torrents/` are imported automatically
+- Settings editor on the Config page, Prometheus `/metrics`, per-tracker breakdown per torrent
+- Torrent names shown instead of hashes; macOS installer with a launchd agent
 
-**UDP tracker detection**
-mitmproxy cannot intercept UDP announces, so those bypass NewGreedy entirely and report *real* statistics. Imported torrents are now scanned for `udp://` trackers; affected domains are logged as `[UDP_BYPASS]` at startup and a red banner appears on the dashboard. Exposed through `GET /api/udp_status`.
-
-#### Security
-
-**Web UI authentication**
-Two optional layers, modelled on Joal: `web_path_prefix` serves the whole UI under an obfuscated path, and `web_secret_token` requires a token (query parameter, `X-Auth-Token` header or cookie). Both empty by default, which preserves the previous behaviour.
-
-**API rate limiting**
-`web_rate_limit` caps requests per minute per client IP (default 240, `0` disables). Excess requests get HTTP 429.
-
-**Secret redaction**
-`GET /api/config` masks `web_secret_token`, and `GET /api/stats` no longer exposes `peer_id` or `key`.
-
-#### Robustness
-
-**Graceful shutdown**
-`SIGTERM` and `SIGINT` now trigger a final stats flush before exit, so `systemctl stop` and `docker stop` no longer lose up to 60 s of data.
-
-**Tracker cumul retention**
-Tracker domains with no announce for `tracker_cumul_ttl_days` (default 30) are dropped from `_tracker_cumul` instead of accumulating forever.
-
-**History compression**
-Per-torrent history keeps full resolution for the last 24 h and one point per hour beyond that, capped at 200 points, keeping `stats.json` small on long-running instances.
-
-**Unambiguous internal keys**
-Internal maps now use an explicit `hash|domain` separator instead of raw concatenation, removing a prefix-collision risk during cleanup.
-
-#### Features
-
-**Watch folder**
-Drop `.torrent` files into the folder set by `watch_folder` (default `torrents/`) and they are imported automatically within ~15 s — no UI interaction needed.
-
-**Settings editor in the UI**
-The Config page can now edit a curated allow-list of settings and write them straight to `config.ini` via `POST /api/config/set`. Ports and secrets are deliberately excluded.
-
-**Prometheus metrics**
-`GET /metrics` exposes torrent count, upload/download bytes, per-torrent ratio, announce counts, per-tracker ratio, stalled and target-reached totals.
-
-**Per-torrent tracker breakdown**
-Upload and download are now tracked per tracker domain within each torrent, shown in a new *Trackers* column and exposed in `GET /api/stats`.
-
-**Torrent names everywhere**
-The Torrents table and Charts selector show the imported torrent name instead of the raw hash, with the hash kept as a tooltip.
-
-**macOS installer**
-`install-macos.sh` installs to `~/Library/Application Support/NewGreedy`, registers a launchd agent and adds the mitmproxy CA to the login keychain.
-
-#### Fixes
-
-**Live log stream no longer freezes**
-The `/ws/logs` reader now detects when `newgreedy.log` shrinks — after a manual truncation or an automatic rotation — and resumes from the start of the new file instead of seeking past its end and going silent forever.
-
-**Rate limiting no longer locks the UI out**
-`web_rate_limit` now applies only to `/api/` and `/metrics`. Pages and static assets are never counted, so a burst of reloads can no longer make `app.js` unreachable and break the whole interface. Idle IP buckets are also pruned.
-
-**Log file writing survives mitmproxy's logging reset**
-The rotating file handler is now attached to the `NewGreedy` logger itself and re-checked on every stats flush, instead of relying on the root logger that mitmproxy reconfigures at startup. Previously `newgreedy.log` could silently stop being written, leaving the Logs page showing days-old entries.
-
-**Tracker ratio bar no longer floods the API**
-The bar was refreshed on *every* incoming log line — 500 requests in a burst when the WebSocket connected, which tripped the rate limiter and rendered the `429` body as tracker data (`error`). It now refreshes on a 20 s timer, and ignores malformed responses.
-
-**GitHub version check cached**
-`/api/version` now caches the GitHub response for one hour (five minutes on failure). Previously every page load hit the GitHub API, and the unauthenticated limit of 60 requests/hour per IP was reached quickly, leaving the Help page showing an empty *Latest on GitHub*. Failures now report a readable reason (rate limit, no network) instead of a silent dash.
-
-**passlib noise silenced**
-The harmless `AttributeError: module 'bcrypt' has no attribute '__about__'` traceback printed by passlib on startup is suppressed.
-
-**Server-side log purge**
-The Logs page gains a *Purge file* button (`DELETE /api/logs`) that truncates `newgreedy.log` on the server, next to *Clear view* which only clears the browser display.
-
-**WebSocket reconnection back-off**
-The Logs page now retries with an increasing delay (3 s → 30 s) instead of hammering the server every 3 seconds while it is unreachable.
-
-#### Also included in this release
-
-
-#### Robustness
-
-**Atomic writes for `stats.json`**
-Stats are now written to a temporary file and moved into place with `os.replace()` after `fsync`. A crash mid-write can no longer leave a truncated or corrupted `stats.json` — the previous file stays intact until the new one is fully flushed.
-
-**Log rotation**
-`newgreedy.log` now uses `RotatingFileHandler` (10 MB per file, 3 backups). On a 24/7 instance the log can no longer grow without bound and fill the disk.
-
-**Memory cleanup**
-The in-memory dicts `_last_seen`, `_swarm_leechers`, `_ports`, `_peer_ids` and `_uas` are now pruned hourly of entries older than 24 h or belonging to removed torrents, preventing a slow memory leak on long-running instances.
-
-**Config validation at startup**
-Numeric config keys are validated on load. An invalid value (e.g. `target_ratio = abc`) now logs an explicit warning instead of silently falling back.
-
-#### Security
-
-**Upload size limit**
-`/api/upload` now rejects files larger than 10 MB with HTTP 413, preventing a multi-GB `.torrent` from exhausting memory.
-
-**Filename sanitisation**
-Uploaded filenames are stripped of path separators, control characters and truncated to 255 chars before being stored in the registry.
-
-#### Performance & code cleanup
-
-**Config parsed once**
-`TorrentStats` now receives a pre-parsed parameter tuple and uses `__slots__`, instead of re-parsing the full config for every torrent on load.
-
-**Unified read cache**
-The purge preview endpoint now reads through the shared 2 s cache instead of hitting the disk directly.
-
-**Shared version module**
-Version parsing and the GitHub release check are consolidated into `_version.py`, removing duplication between the launcher and the web app. `import os` and `import configparser` dead imports removed.
-
----
-
----
+**Fixes**
+- Live log stream survives log truncation and rotation; WebSocket reconnects with back-off
+- Rate limiting no longer blocks pages and static files; GitHub version check cached for an hour
 
 ### v1.7.5
 
-#### Front-end refactor (CSS / JS deduplication)
+**Engine**
+- Global ratio cap checked before the upload is added, so it can no longer be exceeded
+- Per-tracker totals persisted across restarts
+- Target reached stops injection before any stagnation logic runs
+- Exponential backoff after repeated tracker 5xx errors (`[TRACKER_DOWN]` / `[TRACKER_UP]`)
+- Stats flushed at most once a minute instead of on every announce
 
-**Single shared stylesheet**
-The 96-line CSS block that was duplicated inline in all six HTML pages is now served once from `static/style.css` via `<link rel="stylesheet" href="/static/style.css">`. The CSS is byte-for-byte identical to the previous inline block — the UI appearance is unchanged.
+**API**
+- `GET /api/tracker_stats`, `GET /api/stats/purge` (dry-run preview), `DELETE /api/stats/{ih}`
+- Purge by inactivity and CSV ratio fixed; `purge` route reachable again
 
-**Single shared script**
-The common front-end helpers (`fB`, `fR`, `fE`, `fAge`, `getMode`, `stag`, `modeTxt`, `rbar`, `ratioNum`, `initUI`) that were copy-pasted into every page are now defined once in `static/app.js` and loaded via `<script src="/static/app.js">`. Each page keeps only its page-specific logic.
-
-**Result:** total HTML payload reduced from ~91 KB to ~34 KB (−62%). Editing a shared style or helper now touches one file instead of six.
-
-#### Robustness fixes (code review pass)
-
-**FastAPI routing order — `purge` vs `{ih}`**
-`DELETE /api/stats/purge` is now declared before `DELETE /api/stats/{ih}`. Previously the dynamic route captured `purge` as a hash and returned `not found`, making the purge endpoint unreachable.
-
-**Race condition in `_save_stats`**
-The flush thread now iterates over `dict(self._stats)` and `dict(self._tracker_cumul)` snapshots instead of the live dicts, preventing `RuntimeError: dictionary changed size during iteration` when an announce arrives mid-flush.
-
-**Anchored hash regex**
-`_load_stats` validation regex changed from `[0-9a-f]{6,40}` to `^[0-9a-f]{6,40}$` so partial or malformed keys can no longer match.
-
-**Unified stats cache**
-`_load_stats` and `_load_tracker_cumul` now share a single cached file read (`_read_stats_file`, 2 s TTL). `/api/tracker_stats` no longer triggers a second disk read per poll.
-
-**Registry cached at startup**
-`torrent_registry.json` is loaded once into `self._registry` instead of being re-read on every new torrent in the announce hot path.
-
-**`inject_hours` validation**
-Out-of-range or malformed `inject_hours` values now log a warning and fall back to `0-23` instead of silently disabling injection all day.
-
-**`_tail_log` no longer truncates mid-line**
-Reads `max(32768, n * 256)` bytes and drops the first partial line, so long debug lines no longer corrupt the tail output.
-
-**Config consistency**
-`corrupt_field_probability` fallback aligned to `0.05` (matching `config.ini`); previously the code fallback was `0.20`.
-
-**Dead code removed**
-Unused `import os` and the unused `ws_clients` list removed from `newgreedy_web.py`.
-
-#### Engine fixes (`newgreedy_addon.py`)
-
-**Global ratio cap — correct ordering fix**
-The cap guard now checks `(tc["ul"] + delta_ul) / tc["dl"]` before accumulating, then recomputes the allowed delta and updates `tc["ul"]` with the corrected value. Previously, `delta_ul` was added unconditionally first, so the cap was detected one announce too late and the tracker cumul remained inflated.
-
-**`_tracker_cumul` persistence across restarts**
-The per-domain UL/DL counters are now saved to `stats.json` under the key `_tracker_cumul` and reloaded on startup (schema v4). Before this fix, the global ratio guard was blind to all announces that happened before the last restart.
-
-**`[TARGET_REACHED]` short-circuit in `_calc_upload`**
-Once the target ratio is reached, `_calc_upload` now returns immediately before any stagnation logic runs. This eliminates the spurious `[STAG][STALL_ALGO][TARGET_REACHED]` flag combinations visible in logs.
-
-**Timer-based `_save_stats` flush**
-Stats are now flushed at most once every 60 seconds (configurable via `_flush_interval`). A `threading.Lock` protects the write. Forced flushes still happen on `event=stopped` and `done()`. Under 20 active torrents at 250 announces/hour, this reduces disk writes from ~50/hour to ~1/hour.
-
-**Tracker backoff with exponential delay**
-After `TRACKER_BACKOFF_THRESHOLD` (3) consecutive HTTP 5xx errors from a tracker domain, NewGreedy stops forwarding announces to that domain and enters exponential backoff (300s × 2^N, capped at 1800s). Recovery is automatic on first successful response. Logs `[TRACKER_DOWN]` on entry and `[TRACKER_UP]` on recovery.
-
-**`[GLOBAL_CAP]` log line**
-When the global ratio guard triggers, a `[GLOBAL_CAP] domain | tracker_ratio capped → UL adjusted to X.XM` line is emitted for diagnostics.
-
-#### API fixes and additions (`newgreedy_web.py`)
-
-**Purge by inactivity** — removed the erroneous `last_announce_ts > 0` check: entries with no timestamp are now correctly included when `inactive_hours` is set.
-
-**CSV ratio** — fixed double division by 1e6 (ratio is now `ul / dl`, both already in MB).
-
-**`/api/config` target_ratio** — dashboard and torrents pages now read `c.spoofing.target_ratio` correctly from the nested config structure.
-
-**Purge `keep_active=false`** — added `isinstance(v, dict)` guard before deletion.
-
-**`DELETE /api/stats/{ih}`** — delete a single torrent entry by 8-char hash prefix.
-
-**`GET /api/stats/purge`** — dry-run preview returning count and hash list without modifying data.
-
-**`GET /api/tracker_stats`** — new endpoint exposing per-domain UL/DL cumul, ratio, and percentage of the configured cap.
-
-**`/api/logs` bounds** — `lines` parameter validated `ge=10, le=2000` via FastAPI `Query`.
-
-**Stats cache** — `_load_stats()` now caches results for 2 seconds (TTL) to avoid repeated disk reads under concurrent API polling. Cache is invalidated on purge and single-delete operations.
-
-#### Web UI additions
-
-**Dashboard** — warning banner appears automatically when any tracker domain exceeds 80% of `max_global_ratio_per_tracker`. Fetches `/api/tracker_stats` on each refresh cycle.
-
-**Torrents** — added `Last seen` column showing time since last announce in human-readable format (`Xs ago`, `Xm ago`, `Xh ago`, `Xd ago`).
-
-**Logs** — three level-filter buttons (`All` / `Warn` / `Error`) narrow the log view without clearing history. Log analysis section gains two new counters: `GLOBAL_CAP` events and `TRACKER_DOWN` events. A live tracker ratio bar fetches `/api/tracker_stats` and renders a progress bar per domain coloured green / amber / red based on cap proximity.
+**Web UI**
+- Warning banner when a tracker passes 80 % of its cap
+- *Last seen* column, log level filters, live tracker ratio bar
+- Shared `style.css` and `app.js`: pages 62 % lighter
 
 ---
 

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>NewGreedy — Charts</title>
-<link rel="stylesheet" href="/static/style.css?v=1.7.6">
+<link rel="stylesheet" href="/static/style.css?v=1.7.7">
 </head>
 <body>
 <nav>
@@ -30,11 +30,19 @@
   <select id="sel" style="width:200px" onchange="loadChart()">
     <option value="">— Select —</option>
   </select>
+  <button class="btn" id="cmpBtn" onclick="toggleCompare()">⇄ Compare mode</button>
   <span class="spacer"></span>
   <button class="btn" onclick="refresh()">⟳ Refresh</button>
 </div>
+<div id="cmpbox" class="sec" style="display:none;padding:14px 20px;margin-bottom:16px">
+  <div class="sec-t" style="margin-bottom:10px">Select torrents to overlay</div>
+  <div id="cmplist" style="display:flex;gap:14px;flex-wrap:wrap;font-size:12px"></div>
+</div>
 <div id="nosel" class="sec" style="text-align:center;color:var(--mu);padding:48px">
   Select a torrent to display its history.
+</div>
+<div id="cmparea" style="display:none">
+  <div class="ch-wrap"><h2>Ratio comparison</h2><canvas id="cCmp"></canvas></div>
 </div>
 <div id="charea" style="display:none">
   <div id="infoline" class="sec" style="padding:14px 20px;margin-bottom:16px;font-size:13px;display:flex;gap:24px;flex-wrap:wrap"></div>
@@ -44,7 +52,7 @@
 </div>
 
 </main>
-<script src="/static/app.js?v=1.7.6"></script>
+<script src="/static/app.js?v=1.7.7"></script>
 <script>
 if (typeof ngUrl !== 'function') {
   document.addEventListener('DOMContentLoaded', function () {
@@ -80,7 +88,61 @@ function mkChart(id,label,color,data,labels){
     }
   });
 }
+var _cmp=false, _picked=[];
+var PALETTE=['#58a6ff','#3fb950','#a371f7','#d29922','#f85149','#39c5cf','#db61a2','#8b949e'];
+
+function toggleCompare(){
+  _cmp=!_cmp;
+  document.getElementById('cmpBtn').classList.toggle('active',_cmp);
+  document.getElementById('cmpbox').style.display=_cmp?'':'none';
+  document.getElementById('cmparea').style.display='none';
+  document.getElementById('charea').style.display='none';
+  document.getElementById('nosel').style.display=_cmp?'none':'';
+  if(_cmp) buildPicker(); else loadChart();
+}
+function buildPicker(){
+  var box=document.getElementById('cmplist');
+  box.innerHTML=Object.entries(_stats).map(([ih,d])=>
+    '<label style="display:flex;align-items:center;gap:5px;cursor:pointer">'
+    +'<input type="checkbox" value="'+ih+'" onchange="pickChanged()"'+(_picked.indexOf(ih)>-1?' checked':'')+'>'
+    +'<span class="mono">'+fName(d,ih)+'</span></label>').join('');
+}
+function pickChanged(){
+  _picked=Array.from(document.querySelectorAll('#cmplist input:checked')).map(c=>c.value);
+  drawCompare();
+}
+function drawCompare(){
+  var area=document.getElementById('cmparea');
+  if(!_picked.length){area.style.display='none';return;}
+  area.style.display='';
+  Promise.all(_picked.map(ih=>API.get('/api/history/'+ih).catch(()=>[])))
+  .then(all=>{
+    var sets=[], maxLen=0;
+    all.forEach((hist,i)=>{
+      if(!hist||!hist.length) return;
+      maxLen=Math.max(maxLen,hist.length);
+      var col=PALETTE[i%PALETTE.length];
+      sets.push({
+        label:fName(_stats[_picked[i]]||{},_picked[i]),
+        data:hist.map(p=>p.dl>0?+(p.ul/p.dl).toFixed(3):0),
+        borderColor:col,backgroundColor:col+'22',
+        borderWidth:2,pointRadius:0,tension:.3,fill:false
+      });
+    });
+    var labels=[];
+    for(var i=0;i<maxLen;i++) labels.push('#'+(i+1));
+    if(_charts['cCmp']) _charts['cCmp'].destroy();
+    _charts['cCmp']=new Chart(document.getElementById('cCmp'),{
+      type:'line',
+      data:{labels:labels,datasets:sets},
+      options:{responsive:true,plugins:{legend:{display:true,labels:{color:'#8b949e',boxWidth:12}}},
+        scales:{x:{ticks:{color:'#8b949e',maxTicksLimit:10},grid:{color:'#21262d'}},
+                y:{ticks:{color:'#8b949e'},grid:{color:'#21262d'}}}}
+    });
+  });
+}
 function loadChart(){
+  if(_cmp) return;
   var ih=document.getElementById('sel').value;
   document.getElementById('nosel').style.display=ih?'none':'';
   document.getElementById('charea').style.display=ih?'':'none';
@@ -128,7 +190,7 @@ function refresh(){
     var pih=params.get('ih');
     if(pih) sel.value=pih;
     else if(cur) sel.value=cur;
-    loadChart();
+    if(_cmp){buildPicker();drawCompare();}else{loadChart();}
   }).catch(e=>console.error(e));
 }
 // charger Chart.js puis init

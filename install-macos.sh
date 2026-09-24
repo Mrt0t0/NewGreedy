@@ -1,16 +1,24 @@
 #!/usr/bin/env bash
 set -e
-VERSION="v1.7.6"
+VERSION="v1.7.7"
 UPDATE=false
 UNINSTALL=false
+MERGE_OPTS=""
 for arg in "$@"; do
   [ "$arg" = "--update" ] && UPDATE=true
   [ "$arg" = "--uninstall" ] && UNINSTALL=true
+  [ "$arg" = "--keep-scrape" ] && MERGE_OPTS="--keep-scrape"
 done
 
 DEST="$HOME/Library/Application Support/NewGreedy"
 PLIST="$HOME/Library/LaunchAgents/com.mrt0t0.newgreedy.plist"
 LABEL="com.mrt0t0.newgreedy"
+
+PROGRAM_FILES="newgreedy.py newgreedy_addon.py newgreedy_web.py _version.py
+               client_profiles.py updater.py config_merge.py requirements.txt
+               README.md LICENSE install.sh install-macos.sh install.ps1
+               uninstall.sh Dockerfile docker-compose.yml"
+DATA_FILES="config.ini stats.json torrent_registry.json control.json purge_pending.json"
 
 if $UNINSTALL; then
   echo "[NewGreedy] Uninstalling..."
@@ -40,18 +48,34 @@ echo "[NewGreedy] Dependencies installed."
 mkdir -p "$DEST/static" "$DEST/torrents"
 
 if $UPDATE; then
-  for f in config.ini stats.json torrent_registry.json; do
-    [ -f "$DEST/$f" ] && cp "$DEST/$f" "/tmp/ng_$f.bak" 2>/dev/null || true
+  SAVE=$(mktemp -d)
+  trap 'rm -rf "$SAVE"' EXIT
+  for f in $DATA_FILES; do
+    [ -f "$DEST/$f" ] && cp -p "$DEST/$f" "$SAVE/$f"
   done
 fi
 
-cp -R ./* "$DEST/" 2>/dev/null || true
+for f in $PROGRAM_FILES; do
+  [ -f "$f" ] && cp -p "$f" "$DEST/$f"
+done
+cp -p static/* "$DEST/static/"
+cp -p config.ini "$DEST/config.ini"
 
 if $UPDATE; then
-  for f in config.ini stats.json torrent_registry.json; do
-    [ -f "/tmp/ng_$f.bak" ] && cp "/tmp/ng_$f.bak" "$DEST/$f" && rm -f "/tmp/ng_$f.bak"
+  for f in stats.json torrent_registry.json control.json purge_pending.json; do
+    [ -f "$SAVE/$f" ] && cp -p "$SAVE/$f" "$DEST/$f"
   done
-  echo "[NewGreedy] Existing config.ini and stats preserved."
+  if [ -f "$SAVE/config.ini" ]; then
+    echo "[NewGreedy] Merging config.ini — your settings into the $VERSION template..."
+    if python3 "$DEST/config_merge.py" --shipped "$DEST/config.ini" \
+         --current "$SAVE/config.ini" --out "$DEST/config.ini" $MERGE_OPTS; then
+      echo "[NewGreedy] config.ini merged."
+    else
+      cp -p "$SAVE/config.ini" "$DEST/config.ini"
+      echo "[NewGreedy] WARNING: merge failed — your previous config.ini was kept untouched."
+    fi
+  fi
+  echo "[NewGreedy] Stats, registry, control file and torrents/ preserved."
 fi
 
 chmod +x "$DEST/newgreedy.py"

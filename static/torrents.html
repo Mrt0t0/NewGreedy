@@ -4,7 +4,17 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>NewGreedy — Torrents</title>
-<link rel="stylesheet" href="/static/style.css?v=1.7.6">
+<link rel="stylesheet" href="/static/style.css?v=1.7.7">
+<style>
+th.sortable{cursor:pointer;user-select:none}
+th.sortable:hover{color:var(--tx)}
+th.sortable::after{content:'';margin-left:4px;opacity:.4}
+th.sortable.asc::after{content:'\2191';opacity:1}
+th.sortable.desc::after{content:'\2193';opacity:1}
+.tagchip{display:inline-block;font-size:9px;padding:1px 5px;border-radius:10px;background:var(--bg3);border:1px solid var(--bd);color:var(--mu);margin-left:3px}
+.act{background:none;border:1px solid var(--bd);color:var(--mu);border-radius:4px;padding:1px 6px;cursor:pointer;font-size:11px;margin-right:3px}
+.act:hover{color:var(--tx);border-color:var(--mu)}
+</style>
 </head>
 <body>
 <nav>
@@ -45,7 +55,10 @@
   <button class="btn" onclick="setF('down',this)">Downloading</button>
   <button class="btn" onclick="setF('stall',this)">Stalled</button>
   <button class="btn" onclick="setF('tgt',this)">Target</button>
+  <input id="q" placeholder="Search name, hash or tag" oninput="render()"
+         style="width:210px;font-family:var(--font);font-size:12px;padding:4px 10px">
   <span class="spacer"></span>
+  <button class="btn" onclick="window.open(ngUrl('/api/backup'),'_blank')">💾 Backup</button>
   <button class="btn dan" onclick="purge()">🗑 Purge done</button>
   <button class="btn dan" onclick="purgeInactive()">⏱ Purge inactive 12h</button>
   <button class="btn" onclick="window.open('/api/stats/csv','_blank')">⬇ CSV</button>
@@ -54,16 +67,26 @@
 <div class="twrap">
   <table>
     <thead><tr>
-      <th>Hash</th><th>Mode</th><th>Real DL</th><th>Real UL</th><th>Inj. UL</th><th>Ratio</th><th>Progress</th>
-      <th>ETA</th><th>Ann#</th><th>Trackers</th><th>Last seen</th><th>Status</th>
+      <th class="sortable" onclick="setSort('name')">Torrent</th>
+      <th class="sortable" onclick="setSort('mode')">Mode</th>
+      <th class="sortable" onclick="setSort('dl')">Real DL</th>
+      <th class="sortable" onclick="setSort('rul')">Real UL</th>
+      <th class="sortable" onclick="setSort('ul')">Inj. UL</th>
+      <th class="sortable" onclick="setSort('ratio')">Ratio</th>
+      <th>Progress</th>
+      <th>ETA</th>
+      <th class="sortable" onclick="setSort('ann')">Ann#</th>
+      <th>Trackers</th>
+      <th class="sortable" onclick="setSort('seen')">Last seen</th>
+      <th>Status</th><th>Actions</th>
     </tr></thead>
-    <tbody id="tbody"><tr><td colspan="12" style="text-align:center;padding:20px" class="muted">Loading…</td></tr></tbody>
+    <tbody id="tbody"><tr><td colspan="13" style="text-align:center;padding:20px" class="muted">Loading…</td></tr></tbody>
   </table>
 </div>
 <div class="ts" id="ts" style="margin-top:8px"></div>
 
 </main>
-<script src="/static/app.js?v=1.7.6"></script>
+<script src="/static/app.js?v=1.7.7"></script>
 <script>
 if (typeof ngUrl !== 'function') {
   document.addEventListener('DOMContentLoaded', function () {
@@ -85,8 +108,53 @@ function setF(f,el){
   document.querySelectorAll('.toolbar .btn').forEach(b=>b.classList.remove('active'));
   el.classList.add('active'); render();
 }
+var _sort='seen', _dir=-1;
+function setSort(k){
+  if(_sort===k){_dir=-_dir;}else{_sort=k;_dir=(k==='name'?1:-1);}
+  document.querySelectorAll('th.sortable').forEach(t=>t.classList.remove('asc','desc'));
+  var idx={name:0,mode:1,dl:2,rul:3,ul:4,ratio:5,ann:8,seen:10}[k];
+  var th=document.querySelectorAll('thead th')[idx];
+  if(th) th.classList.add(_dir>0?'asc':'desc');
+  render();
+}
+function sortVal(k,ih,d){
+  if(k==='name')  return (d.name||ih).toLowerCase();
+  if(k==='mode')  return getMode(d);
+  if(k==='dl')    return d.cumul_rep_dl||0;
+  if(k==='rul')   return d.cumul_real_ul||0;
+  if(k==='ul')    return d.cumul_rep_ul||0;
+  if(k==='ratio') return ratioNum(d)||0;
+  if(k==='ann')   return d.ann_count||0;
+  return d.last_announce_ts||0;
+}
+function matchQ(ih,d,q){
+  if(!q) return true;
+  q=q.toLowerCase();
+  if(ih.toLowerCase().indexOf(q)>-1) return true;
+  if((d.name||'').toLowerCase().indexOf(q)>-1) return true;
+  return (d.tags||[]).some(t=>t.toLowerCase().indexOf(q)>-1);
+}
+function togglePause(ih,cur){
+  API.post('/api/control/pause',{hash:ih,paused:!cur}).then(load)
+    .catch(e=>alert('Error: '+e.message));
+}
+function editRatio(ih,d){
+  var cur=(d.override&&d.override.target_ratio)||'';
+  var v=prompt('Target ratio for '+(d.name||ih)+'\n(empty to clear the override)',cur);
+  if(v===null) return;
+  var body=v.trim()===''?{hash:ih,clear:true}:{hash:ih,target_ratio:parseFloat(v)};
+  if(v.trim()!==''&&isNaN(body.target_ratio)){alert('Not a number');return;}
+  API.post('/api/control/override',body).then(load).catch(e=>alert('Error: '+e.message));
+}
+function editTags(ih,d){
+  var v=prompt('Tags for '+(d.name||ih)+' (comma separated)',(d.tags||[]).join(', '));
+  if(v===null) return;
+  API.post('/api/control/tags',{hash:ih,tags:v}).then(load).catch(e=>alert('Error: '+e.message));
+}
 function render(){
+  var q=(document.getElementById('q')||{}).value||'';
   var rows=Object.entries(_data).filter(([ih,d])=>{
+    if(!matchQ(ih,d,q)) return false;
     var m=getMode(d);
     if(_filter==='all')   return true;
     if(_filter==='seed')  return m==='SEED';
@@ -97,16 +165,20 @@ function render(){
   });
   var tb=document.getElementById('tbody');
   if(!rows.length){
-    tb.innerHTML='<tr><td colspan="12" style="text-align:center;padding:20px" class="muted">No data</td></tr>';
+    tb.innerHTML='<tr><td colspan="13" style="text-align:center;padding:20px" class="muted">No data</td></tr>';
     return;
   }
+  rows.sort((a,b)=>{
+    var x=sortVal(_sort,a[0],a[1]), y=sortVal(_sort,b[0],b[1]);
+    return x<y?-_dir:x>y?_dir:0;
+  });
   tb.innerHTML=rows.map(([ih,d])=>{
     var r=ratioNum(d);
     var eta=d.ann_count>1&&d.cumul_rep_dl>0
       ? Math.round(Math.max(0,d.cumul_rep_dl*_tgt-d.cumul_rep_ul)/(d.cumul_rep_ul/d.ann_count))
       : 0;
     return '<tr>'
-      +'<td class="mono"><a href="'+ngUrl('/charts?ih='+ih)+'" title="'+ih+'" style="color:var(--mu)">'+fName(d,ih)+'</a>'+(d.has_udp?' <span class="tag stall" title="This torrent uses UDP trackers which bypass NewGreedy">UDP</span>':'')+'</td>'
+      +'<td class="mono"><a href="'+ngUrl('/charts?ih='+ih)+'" title="'+ih+'" style="color:var(--mu)">'+fName(d,ih)+'</a>'+(d.has_udp?' <span class="tag stall" title="This torrent uses UDP trackers which bypass NewGreedy">UDP</span>':'')+(d.override&&d.override.target_ratio?' <span class="tagchip" title="Ratio override">R'+d.override.target_ratio+'</span>':'')+((d.tags||[]).map(t=>' <span class="tagchip">'+t+'</span>').join(''))+'</td>'
       +'<td>'+modeTxt(d)+'</td>'
       +'<td class="mono">'+(d.cumul_rep_dl>0?fB(d.cumul_rep_dl):'<span class="muted">—</span>')+'</td>'
       +'<td class="mono muted">'+fB(d.cumul_real_ul||0)+'</td>'
@@ -167,7 +239,7 @@ function load(){
     render();
   })
   .catch(e=>{
-    document.getElementById('tbody').innerHTML='<tr><td colspan="12" style="text-align:center;padding:20px;color:var(--er)">API error: '+e.message+'</td></tr>';
+    document.getElementById('tbody').innerHTML='<tr><td colspan="13" style="text-align:center;padding:20px;color:var(--er)">API error: '+e.message+'</td></tr>';
   });
 }
 load(); setInterval(load,15000);
