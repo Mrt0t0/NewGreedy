@@ -1,0 +1,43 @@
+# Runtime data — never commit
+config.ini.mine
+stats.json
+torrent_registry.json
+purge_pending.json
+control.json
+trash.json
+stats_import.json
+.addon_status.json
+*.lock
+data/
+backups/
+newgreedy.log
+newgreedy.log.*
+.shutdown
+.restart
+.backup/
+launchd.out.log
+launchd.err.log
+
+# Watch folder contents (keep the folder itself)
+torrents/*
+!torrents/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# mitmproxy certificates
+*.pem
+*.p12
+*.crt
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
