@@ -158,7 +158,7 @@ cd NewGreedy
 Requires `sudo` — installs to `/opt/newgreedy` and registers a systemd service.
 
 ```bash
-sudo ./install.sh
+sudo bash install.sh
 ```
 
 The installer:
@@ -187,13 +187,13 @@ A CA trusted system-wide lets whoever gets its private key intercept every TLS c
 - **Only the torrent client** (recommended): the installer writes `/var/lib/newgreedy/client-ca-bundle.pem` (system CAs + the NewGreedy CA). Start the client with
   `SSL_CERT_FILE=/var/lib/newgreedy/client-ca-bundle.pem CURL_CA_BUNDLE=/var/lib/newgreedy/client-ca-bundle.pem qbittorrent`
   (for a systemd unit: `Environment=SSL_CERT_FILE=...`). Re-run the installer after a `ca-certificates` update to refresh the bundle.
-- **The whole system**: `sudo ./install.sh --trust-ca` installs it as `/usr/local/share/ca-certificates/newgreedy-mitmproxy-ca.crt`. A CA trusted this way by an older version stays trusted on update.
+- **The whole system**: `sudo bash install.sh --trust-ca` installs it as `/usr/local/share/ca-certificates/newgreedy-mitmproxy-ca.crt`. A CA trusted this way by an older version stays trusted on update.
 
 Keep the cloned folder: updates are run from it — see [Updating](#updating).
 
 **Uninstall:**
 ```bash
-sudo ./uninstall.sh
+sudo bash uninstall.sh
 ```
 Removes the service, the program, its data, the `newgreedy` account **and the NewGreedy CA from the system trust store** — only that certificate, compared byte for byte. `/root/.mitmproxy`, used by versions before v1.7.8 and by other mitmproxy tools, is left in place.
 
@@ -214,8 +214,7 @@ journalctl -u newgreedy -f
 ```bash
 git clone https://github.com/Mrt0t0/NewGreedy.git
 cd NewGreedy
-chmod +x install-macos.sh
-./install-macos.sh
+bash install-macos.sh
 ```
 
 The installer:
@@ -241,7 +240,7 @@ Keep the cloned folder: updates are run from it — see [Updating](#updating).
 
 **Uninstall:**
 ```bash
-./install-macos.sh --uninstall
+bash install-macos.sh --uninstall
 ```
 Removes the launchd agent and the NewGreedy CA from the login keychain — found by its SHA-1 fingerprint, so other mitmproxy certificates stay; data is kept.
 
@@ -342,8 +341,8 @@ Every method keeps your data — `stats.json`, `torrent_registry.json`, `control
 
 | Install | Command-line update | Web button |
 |---|---|---|
-| Linux | `git pull`, then `sudo ./install.sh --update` | ✅ restarts on its own |
-| macOS | `git pull`, then `./install-macos.sh --update` | ✅ restarts on its own |
+| Linux | `git pull`, then `sudo bash install.sh --update` | ✅ restarts on its own |
+| macOS | `git pull`, then `bash install-macos.sh --update` | ✅ restarts on its own |
 | Windows | `git pull`, then `.\install.ps1 -Update` | ✅ start it again if it does not come back |
 | Docker | `docker compose pull && docker compose up -d` | ❌ disabled — the program lives in the image |
 | Manual | save `config.ini`, `git pull`, merge, restart | ✅ start NewGreedy again afterwards |
@@ -375,7 +374,7 @@ Four defaults change. Check them before restarting:
 ```bash
 cd ~/NewGreedy                 # the folder you installed from
 git pull                       # or extract the new release zip over it
-sudo ./install.sh --update
+sudo bash install.sh --update
 ```
 
 The installer replaces the program files in `/opt/newgreedy`, merges `config.ini`, and restarts the service. Follow it with `journalctl -u newgreedy -f`.
@@ -387,7 +386,7 @@ v1.7.6 copied its `.git/` folder into `/opt/newgreedy`. It is not used; `sudo rm
 ```bash
 cd ~/NewGreedy
 git pull
-./install-macos.sh --update
+bash install-macos.sh --update
 ```
 
 No `sudo`. Files in `~/Library/Application Support/NewGreedy` are updated and the launchd agent is reloaded.
@@ -849,7 +848,7 @@ GET    /api/tracker_stats                                     # per-domain ratio
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| New settings missing from the Config page | `config.ini` was kept as is by an older installer | Run `sudo ./install.sh --update` again from v1.7.7 |
+| New settings missing from the Config page | `config.ini` was kept as is by an older installer | Run `sudo bash install.sh --update` again from v1.7.7 |
 | `git pull` refuses: *local changes to config.ini* | Docker or manual install: your settings live in the tracked file | See [Updating](#updating) — set it aside, pull, merge it back |
 | `peer_id` changes at every restart | `session_identity = drift` redraws its random part, as a real client does | Expected. `stable` freezes it |
 | `[CUMUL_RESET]` once after upgrading, tracker totals at zero | Totals from v1.7.6 were over-counted and are discarded | Expected. They rebuild from real figures |
