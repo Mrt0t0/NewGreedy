@@ -5,7 +5,7 @@
 ### BitTorrent announce proxy — Upload ratio spoofer
 
 [![Version](https://img.shields.io/badge/version-1.7.8-blue?style=flat-square)](https://github.com/Mrt0t0/NewGreedy/releases)
-[![Python](https://img.shields.io/badge/python-3.9%2B-green?style=flat-square)](https://python.org)
+[![Python](https://img.shields.io/badge/python-3.10%2B-green?style=flat-square)](https://python.org)
 [![License](https://img.shields.io/badge/license-GPLv3-gray?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows%20%7C%20Docker-lightgray?style=flat-square)](https://github.com/Mrt0t0/NewGreedy)
 
@@ -22,6 +22,7 @@
 ## Contents
 
 - [What does NewGreedy do?](#what-does-newgreedy-do)
+- [Screenshots](#screenshots)
 - [Features](#features)
 - [How it works](#how-it-works)
 - [Requirements](#requirements)
@@ -45,6 +46,25 @@ NewGreedy is a **local HTTP/HTTPS proxy** that sits between your torrent client 
 Every time your client sends an announce, NewGreedy intercepts it and rewrites the `uploaded`, `downloaded`, `left`, `peer_id` and `port` fields before forwarding the request, as one consistent client that behaves the way the real one would.
 
 Your torrent client and the files on disk are **never touched**. Only the statistics reported to trackers change.
+
+---
+
+## Screenshots
+
+*Demo data: the torrents and trackers shown are fictitious.*
+
+![Dashboard](docs/screenshots/dashboard.png)
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/torrents.png" alt="Torrents page"><br><sub><b>Torrents</b> - tags, pause, ratio override, trash</sub></td>
+    <td width="50%"><img src="docs/screenshots/charts.png" alt="Charts page"><br><sub><b>Charts</b> - upload and download history per torrent</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/status.png" alt="Status page"><br><sub><b>Status</b> - self-check and torrent client setup</sub></td>
+    <td width="50%"><img src="docs/screenshots/logs.png" alt="Live logs"><br><sub><b>Logs</b> - live stream and log analysis</sub></td>
+  </tr>
+</table>
 
 ---
 
