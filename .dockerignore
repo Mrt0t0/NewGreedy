@@ -19,3 +19,4 @@ newgreedy.log*
 .restart
 config.ini.mine
 .git/
+docs/
