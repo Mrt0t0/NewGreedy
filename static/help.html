@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>NewGreedy — Help</title>
-<link rel="stylesheet" href="/static/style.css?v=1.7.7">
+<link rel="stylesheet" href="/static/style.css?v=__NG_VERSION__">
 </head>
 <body>
 <nav>
@@ -15,6 +15,7 @@
     <a href="/charts"   data-page="charts">Charts</a>
     <a href="/config"   data-page="config">Config</a>
     <a href="/logs"     data-page="logs">Logs</a>
+    <a href="/status"   data-page="status">Status</a>
     <a href="/help"     data-page="help">Help</a>
   </div>
   <div class="nav-right">
@@ -39,6 +40,12 @@
   <div id="upstate" style="display:none;font-size:12px;margin-top:10px"></div>
   <div id="verr" class="muted" style="display:none;font-size:12px;margin-top:6px">
   </div>
+  <div id="docknote" class="muted" style="display:none;font-size:12px;margin-top:6px"></div>
+  <details id="relbox" style="display:none;margin-top:12px">
+    <summary style="cursor:pointer;font-size:13px">What's new in <span id="reltag">—</span>
+      <span class="muted" id="relchan"></span></summary>
+    <div class="relnotes" id="relnotes"></div>
+  </details>
 </div>
 <div class="sec">
   <div class="sec-t">📋 Log fields</div>
@@ -71,6 +78,14 @@
       <tr><td class="mono">[CONTROL]</td><td>Pause/override/tag file reloaded</td></tr>
       <tr><td class="mono">[WATCH]</td><td>Torrent auto-imported from the watch folder</td></tr>
       <tr><td class="mono">[CUMUL_PURGE]</td><td>Inactive tracker dropped from the cumulative ratio</td></tr>
+      <tr><td class="mono">[AUTO-PURGE]</td><td>No announce for inactive_purge_hours — moved to the trash</td></tr>
+      <tr><td class="mono">[TRASH]</td><td>Trash entries older than trash_retention_days deleted for good</td></tr>
+      <tr><td class="mono">[RESTORE]</td><td>Stats replaced from a backup, or torrents brought back from the trash</td></tr>
+      <tr><td class="mono">[BACKUP]</td><td>Backup archive written (auto, manual, pre-update, pre-restore)</td></tr>
+      <tr><td class="mono">[CONFIG]</td><td>config.ini reloaded live, or merged after an upgrade</td></tr>
+      <tr><td class="mono">[REGISTRY]</td><td>torrent_registry.json reloaded — sizes corrected if needed</td></tr>
+      <tr><td class="mono">[ENGINE_FAILED]</td><td>The engine could not start — announces get a tracker error until it is fixed</td></tr>
+      <tr><td class="mono">[TOKEN]</td><td>Web UI token rotated or removed</td></tr>
     </tbody>
   </table></div>
 </div>
@@ -81,7 +96,7 @@
     <tbody>
       <tr><td class="mono">/api/stats</td><td class="muted">GET</td><td>All torrent stats</td></tr>
       <tr><td class="mono">/api/stats/csv</td><td class="muted">GET</td><td>Export CSV</td></tr>
-      <tr><td class="mono">/api/stats/purge</td><td class="muted">DELETE</td><td>Remove stopped torrents from stats</td></tr>
+      <tr><td class="mono">/api/stats/purge</td><td class="muted">DELETE</td><td>Move finished or inactive torrents to the trash</td></tr>
       <tr><td class="mono">/api/health</td><td class="muted">GET</td><td>Stalled, anomalies, target_reached</td></tr>
       <tr><td class="mono">/api/history/{ih}</td><td class="muted">GET</td><td>Time series per torrent</td></tr>
       <tr><td class="mono">/api/config</td><td class="muted">GET</td><td>config.ini as JSON</td></tr>
@@ -100,7 +115,17 @@
       <tr><td class="mono">/api/control/tags</td><td class="muted">POST</td><td>Assign tags to a torrent</td></tr>
       <tr><td class="mono">/api/profiles</td><td class="muted">GET</td><td>Available emulated client profiles</td></tr>
       <tr><td class="mono">/api/backup</td><td class="muted">GET</td><td>Download a zip of config and stats</td></tr>
-      <tr><td class="mono">/api/restore</td><td class="muted">POST</td><td>Restore a backup archive</td></tr>
+      <tr><td class="mono">/api/restore</td><td class="muted">POST</td><td>Restore an uploaded backup archive</td></tr>
+      <tr><td class="mono">/api/backups</td><td class="muted">GET / POST</td><td>List stored backups / create one now</td></tr>
+      <tr><td class="mono">/api/backups/{name}</td><td class="muted">GET / DELETE</td><td>Download / delete a stored backup</td></tr>
+      <tr><td class="mono">/api/backups/{name}/restore</td><td class="muted">POST</td><td>Restore a stored backup</td></tr>
+      <tr><td class="mono">/api/trash</td><td class="muted">GET / DELETE</td><td>Purged torrents kept for trash_retention_days / empty it</td></tr>
+      <tr><td class="mono">/api/trash/{ih}/restore</td><td class="muted">POST</td><td>Bring a purged torrent back</td></tr>
+      <tr><td class="mono">/api/status</td><td class="muted">GET</td><td>Self-check, engine state, last announce, file sizes</td></tr>
+      <tr><td class="mono">/api/notify/test</td><td class="muted">POST</td><td>Send a test notification</td></tr>
+      <tr><td class="mono">/api/token/rotate</td><td class="muted">POST</td><td>Generate a new web UI token</td></tr>
+      <tr><td class="mono">/api/login · /api/logout</td><td class="muted">POST</td><td>Open / close a browser session</td></tr>
+      <tr><td class="mono">/api/update/release</td><td class="muted">GET</td><td>Release notes of the latest version on your channel</td></tr>
       <tr><td class="mono">/metrics</td><td class="muted">GET</td><td>Prometheus metrics</td></tr>
       <tr><td class="mono">/ws/logs</td><td class="muted">WS</td><td>Real-time log stream</td></tr>
     </tbody>
@@ -115,10 +140,12 @@
     Port: <span class="ic">3456</span><br>
     ☑ Enable <em>"Use proxy for tracker communication"</em>
   </p>
+  <p style="font-size:12px;color:var(--mu)">Other clients, and a live check that announces arrive: see the
+    <a href="#" onclick="location.href=ngUrl('/status');return false">Status</a> page.</p>
 </div>
 
 </main>
-<script src="/static/app.js?v=1.7.7"></script>
+<script src="/static/app.js?v=__NG_VERSION__"></script>
 <script>
 if (typeof ngUrl !== 'function') {
   document.addEventListener('DOMContentLoaded', function () {
@@ -134,6 +161,13 @@ if (typeof ngUrl !== 'function') {
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 
+API.get('/api/update/release').then(r=>{
+  document.getElementById('reltag').textContent=r.tag+(r.prerelease?' (pre-release)':'');
+  document.getElementById('relchan').textContent=' — channel: '+r.channel;
+  document.getElementById('relnotes').textContent=r.notes||'No release notes.';
+  document.getElementById('relbox').style.display='block';
+  if(r.update_available) document.getElementById('relbox').open=true;
+}).catch(()=>{});
 API.get('/api/version').then(v=>{
   document.getElementById('vlocal').textContent=v.current||'—';
   var g=document.getElementById('vgit');
@@ -142,7 +176,7 @@ API.get('/api/version').then(v=>{
     g.style.color=v.update_available?'var(--wa)':'var(--ok)';
     g.title=v.cached?'cached result':'';
     if(v.update_available){
-      document.getElementById('upbtn').style.display='inline-block';
+      if(!v.docker) document.getElementById('upbtn').style.display='inline-block';
       var l=document.getElementById('vlink');
       l.href=v.url||'https://github.com/Mrt0t0/NewGreedy/releases';
       l.style.display='inline-block';
@@ -169,7 +203,8 @@ function showState(cls,txt){
   e.textContent=txt;
 }
 function startUpdate(){
-  if(!confirm('Download the latest release and replace the program files?\n\nconfig.ini, stats.json and your torrent data are preserved.')) return;
+  var tag=document.getElementById('reltag').textContent;
+  if(!confirm('Install '+tag+'?\n\nRead "What\'s new" below first. A backup of your data is written before anything changes; config.ini, stats and torrents are preserved.')) return;
   document.getElementById('upbtn').disabled=true;
   API.post('/api/update/start',{}).then(d=>{
     if(!d.started){showState('er','✗ '+d.message);document.getElementById('upbtn').disabled=false;return;}
@@ -191,7 +226,7 @@ function pollUpdate(){
         document.getElementById('rsbtn').style.display='inline-block';
         document.getElementById('upbtn').style.display='none';
       }else if(s.status==='error'){
-        showState('er','✗ '+s.message+' — previous files were restored');
+        showState('er','✗ '+s.message);
         document.getElementById('upbtn').disabled=false;
       }
     }).catch(()=>clearInterval(_upTimer));
@@ -211,6 +246,7 @@ function doRestart(){
   },2500);
 }
 API.get('/api/update/status').then(s=>{
+  if(s.docker&&s.docker_note){var dn=document.getElementById('docknote');dn.textContent='Docker: '+s.docker_note;dn.style.display='block';}
   if(s.restart_pending){
     document.getElementById('rsbtn').style.display='inline-block';
     showState('ok','An update was applied — restart to load the new files');

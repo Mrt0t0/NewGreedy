@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NewGreedy v1.7.7 — launcher"""
+"""NewGreedy — launcher"""
 #
 # NewGreedy - BitTorrent announce proxy
 # Copyright (C) 2026  Mrt0t0
@@ -17,13 +17,10 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #
-import configparser, json, logging, re, signal, sys, threading, time, socket
-from pathlib import Path
+import argparse, json, logging, re, signal, sys, threading, time
 from _version import VERSION, parse_version, fetch_latest
-
-_BASE = Path(__file__).parent.resolve()
-_CONFIG_FILE = _BASE / "config.ini"
-_SHUTDOWN_FLAG = _BASE / ".shutdown"
+import config_schema as cs
+import datastore
 
 _root_logger = logging.getLogger()
 _root_logger.setLevel(logging.INFO)
@@ -33,20 +30,32 @@ _root_logger.addHandler(_handler)
 logging.getLogger("passlib").setLevel(logging.ERROR)
 logger = logging.getLogger("NewGreedy")
 
-cfg = configparser.ConfigParser(inline_comment_prefixes=(";", "#"), interpolation=None)
-cfg.read(str(_CONFIG_FILE))
+RESTART_DELAY_S = 5
+RESTART_WINDOW_S = 600
 
+cfg = None
 _shutting_down = threading.Event()
 
 
+def _load_cfg():
+    global cfg
+    cfg = cs.load(datastore.CONFIG_FILE)
+    return cfg
+
+
 def _sighup(signum, frame):
-    cfg.read(str(_CONFIG_FILE))
-    logger.info("Config reloaded (SIGHUP)")
+    _load_cfg()
+    try:
+        from newgreedy_web import set_config
+        set_config(cfg)
+    except Exception:
+        pass
+    logger.info("Config reloaded (SIGHUP) - the engine picks up config.ini changes by itself")
 
 
 def _request_addon_flush():
     try:
-        with open(_SHUTDOWN_FLAG, "w", encoding="utf-8") as f:
+        with open(datastore.SHUTDOWN_FLAG, "w", encoding="utf-8") as f:
             json.dump({"ts": time.time()}, f)
     except Exception as e:
         logger.debug("shutdown flag write failed: %s", e)
@@ -63,19 +72,20 @@ def _shutdown(signum, frame):
     sys.exit(0)
 
 
-if hasattr(signal, "SIGHUP"):
-    signal.signal(signal.SIGHUP, _sighup)
-for _sig in ("SIGTERM", "SIGINT"):
-    if hasattr(signal, _sig):
-        try:
-            signal.signal(getattr(signal, _sig), _shutdown)
-        except (ValueError, OSError):
-            pass
+def _install_signals():
+    if hasattr(signal, "SIGHUP"):
+        signal.signal(signal.SIGHUP, _sighup)
+    for _sig in ("SIGTERM", "SIGINT"):
+        if hasattr(signal, _sig):
+            try:
+                signal.signal(getattr(signal, _sig), _shutdown)
+            except (ValueError, OSError):
+                pass
 
 
 def _check_update():
     try:
-        data = fetch_latest(timeout=4)
+        data = fetch_latest(timeout=4, channel=cs.get(cfg, "update", "update_channel"))
         latest = data.get("tag_name", "").strip()
         if latest and parse_version(latest) > parse_version(VERSION):
             logger.warning("*** UPDATE AVAILABLE: %s -> %s - %s ***",
@@ -86,24 +96,81 @@ def _check_update():
         logger.debug("Update check failed: %s", e)
 
 
+def _check_bcrypt():
+    import diagnostics
+    v = diagnostics.bcrypt_conflict()
+    if v:
+        logger.error("bcrypt %s is installed and crashes the passlib version mitmproxy uses - "
+                     "remove it with: pip uninstall bcrypt", v)
+
+
+def _merge_shipped_config():
+    """Bring the data folder's config.ini up to the shipped one (Docker image upgrades)."""
+    shipped, current = datastore.SHIPPED_CONFIG, datastore.CONFIG_FILE
+    if shipped.resolve() == current.resolve() or not shipped.is_file() or not current.is_file():
+        return
+    try:
+        import config_merge, backups
+        shipped_text = shipped.read_text(encoding="utf-8")
+        current_text = current.read_text(encoding="utf-8")
+        if not config_merge.needs_merge(shipped_text, current_text):
+            return
+        backups.create("pre-merge")
+        merged, report = config_merge.merge(shipped_text, current_text)
+        from _version import atomic_write_bytes
+        atomic_write_bytes(current, merged.encode("utf-8"))
+        for line in config_merge.format_report(report):
+            logger.info("[CONFIG] %s", line)
+    except Exception as e:
+        logger.warning("[CONFIG] config.ini left untouched, merge failed: %s", e)
+
+
+def _ensure_token():
+    if not cs.get(cfg, "web", "web_enabled"):
+        return
+    host = cs.get(cfg, "web", "web_host")
+    if cs.is_loopback(host) or cs.get(cfg, "web", "web_secret_token"):
+        return
+    if cfg.get("web", "web_secret_token", fallback="").strip():
+        logger.warning("web_secret_token in config.ini is not valid (8 to 256 printable "
+                       "characters, no spaces) - replaced by a generated one")
+    token = cs.new_token()
+    try:
+        cs.set_value(datastore.CONFIG_FILE, "web", "web_secret_token", token)
+    except Exception as e:
+        logger.error("Web UI bound to %s without a token and none could be saved (%s) - "
+                     "the web UI is disabled", host, e)
+        cfg.set("web", "web_enabled", "false")
+        return
+    _load_cfg()
+    port = cs.get(cfg, "web", "web_port")
+    prefix = cs.get(cfg, "web", "web_path_prefix")
+    # printed to the console only, never to newgreedy.log
+    print("=" * 72, flush=True)
+    print(f"  Web UI listens on {host}:{port} - an access token was generated", flush=True)
+    print(f"  and saved as web_secret_token in {datastore.CONFIG_FILE}", flush=True)
+    print(f"  Open: http://<this-host>:{port}/{prefix + '/' if prefix else ''}?token={token}", flush=True)
+    print("=" * 72, flush=True)
+
+
 def _start_web():
     try:
         import uvicorn
         from newgreedy_web import app, set_config
         set_config(cfg)
-        host = cfg.get("web", "web_host", fallback="0.0.0.0")
-        port = cfg.getint("web", "web_port", fallback=8080)
+        host = cs.get(cfg, "web", "web_host")
+        port = cs.get(cfg, "web", "web_port")
         uvicorn.run(app, host=host, port=port, log_level="warning")
     except Exception as e:
         logger.warning("Web UI not started: %s", e)
 
 
 def _upstream_args():
-    url = (cfg.get("upstream", "proxy_url", fallback="") or "").strip()
+    url = cs.get(cfg, "upstream", "proxy_url")
     if not url:
         return []
     args = ["--mode", "upstream:" + url]
-    bypass = [d.strip() for d in cfg.get("upstream", "proxy_bypass", fallback="").split(",") if d.strip()]
+    bypass = cs.get(cfg, "upstream", "proxy_bypass")
     for domain in bypass:
         args += ["--ignore-hosts", re.escape(domain)]
     logger.info("Upstream proxy enabled: %s%s", url,
@@ -111,63 +178,87 @@ def _upstream_args():
     return args
 
 
-def _run_mitm(listen_port):
+def _mitm_args(listen_host, listen_port):
+    import diagnostics
+    args = ["mitmdump",
+            "--listen-host", listen_host,
+            "--listen-port", str(listen_port),
+            "--set", f"confdir={diagnostics.mitm_confdir()}",
+            "-s", str(datastore.BASE_DIR / "newgreedy_addon.py")]
+    if not cs.get(cfg, "ssl", "ssl_verify_trackers"):
+        args.append("--ssl-insecure")
+        logger.warning("ssl_verify_trackers = false - tracker certificates are not checked")
+    return args + _upstream_args()
+
+
+def _run_mitm(listen_host, listen_port):
     from mitmproxy.tools.main import mitmdump
-    sys.argv = [
-        "mitmdump",
-        "--listen-host", "0.0.0.0",
-        "--listen-port", str(listen_port),
-        "-s", str(_BASE / "newgreedy_addon.py"),
-    ] + _upstream_args()
-    mitmdump()
+    sys.argv = _mitm_args(listen_host, listen_port)
+    return mitmdump()
 
 
-def _port_free(port, timeout=15.0):
+def _port_free(host, port, timeout=15.0):
+    import diagnostics
     deadline = time.time() + timeout
     while time.time() < deadline:
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                s.bind(("0.0.0.0", port))
-                return True
-        except OSError:
-            time.sleep(0.5)
+        if diagnostics.can_bind(host, port):
+            return True
+        time.sleep(0.5)
     return False
 
 
-def _watchdog(listen_port, max_restarts=5):
-    restarts = 0
-    while restarts < max_restarts and not _shutting_down.is_set():
-        logger.info("NewGreedy %s started - proxy on port %d", VERSION, listen_port)
+def _drop_mitm_log_handlers():
+    """mitmdump leaves its log handler on the root logger, bound to its closed event loop:
+    any later log line would raise 'Event loop is closed'."""
+    for lg in (_root_logger, logger):
+        for h in list(lg.handlers):
+            if "mitmproxy" in type(h).__module__:
+                lg.removeHandler(h)
+
+
+def _watchdog(listen_host, listen_port, max_restarts=5):
+    """mitmproxy installs its own SIGINT/SIGTERM handlers: a stop request makes mitmdump()
+    return normally, so a normal return means stop. Only failures are restarted."""
+    failures = []
+    while not _shutting_down.is_set():
+        logger.info("NewGreedy %s started - proxy on %s:%d", VERSION, listen_host, listen_port)
         try:
-            _run_mitm(listen_port)
-        except SystemExit:
-            break
+            _run_mitm(listen_host, listen_port)
+            _drop_mitm_log_handlers()
+            logger.info("NewGreedy %s stopped.", VERSION)
+            return 0
+        except SystemExit as e:
+            _drop_mitm_log_handlers()
+            if e.code in (None, 0) or _shutting_down.is_set():
+                return 0
+            reason = f"mitmproxy exited with code {e.code}"
         except Exception as e:
+            _drop_mitm_log_handlers()
             if _shutting_down.is_set():
-                break
-            restarts += 1
-            logger.error("mitmproxy crashed (%s) - restarting in 5s [%d/%d]",
-                         e, restarts, max_restarts)
-            time.sleep(5)
-            if not _port_free(listen_port, timeout=15.0):
-                logger.error("Port %d still in use after 15s - aborting.", listen_port)
-                break
+                return 0
+            reason = f"mitmproxy crashed ({e})"
+        now = time.time()
+        failures = [t for t in failures if now - t < RESTART_WINDOW_S] + [now]
+        if len(failures) > max_restarts:
+            break
+        logger.error("%s - restarting in %ds [%d/%d]", reason, RESTART_DELAY_S,
+                     len(failures), max_restarts)
+        time.sleep(RESTART_DELAY_S)
+        if not _port_free(listen_host, listen_port, timeout=15.0):
+            logger.error("Port %d still in use after 15s - aborting.", listen_port)
+            break
     if _shutting_down.is_set():
-        return
+        return 0
     msg = f"[NewGreedy] Max restarts ({max_restarts}) reached - exiting."
     try:
-        for h in list(_root_logger.handlers):
-            if "mitmproxy" in type(h).__module__:
-                _root_logger.removeHandler(h)
         logger.error(msg)
     except Exception:
         print(msg, file=sys.stderr, flush=True)
-    sys.exit(1)
+    return 1
 
 
 def _consume_restart_flag():
-    flag = _BASE / ".restart"
+    flag = datastore.RESTART_FLAG
     try:
         info = json.loads(flag.read_text(encoding="utf-8"))
         flag.unlink()
@@ -181,22 +272,53 @@ def _consume_restart_flag():
             pass
 
 
-def main():
+def check_config():
+    import diagnostics
+    datastore.ensure_data_dir()
+    _load_cfg()
+    print(f"NewGreedy {VERSION} - checking {datastore.CONFIG_FILE}\n")
+    checks = diagnostics.run(cfg, live=False)
+    diagnostics.print_report(checks)
+    return 1 if diagnostics.summary(checks) == "error" else 0
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(description=f"NewGreedy {VERSION}")
+    p.add_argument("--check-config", action="store_true",
+                   help="check config.ini, ports, data folder and CA, then exit")
+    args = p.parse_args(argv)
+    if args.check_config:
+        return check_config()
+
+    _install_signals()
     logger.info("NewGreedy %s starting...", VERSION)
+    moved = datastore.ensure_data_dir()
+    if moved:
+        logger.info("Data folder %s initialised with: %s", datastore.DATA_DIR, ", ".join(moved))
+    _merge_shipped_config()
+    _load_cfg()
+    level = cs.get(cfg, "advanced", "log_level")
+    logging.getLogger("NewGreedy").setLevel(getattr(logging, level, logging.INFO))
+    for level_, section, key, msg in cs.check(cfg):
+        if level_ == "error":
+            logger.warning("config.ini [%s] %s: %s - default used", section, key, msg)
+    _check_bcrypt()
     _consume_restart_flag()
     try:
-        _SHUTDOWN_FLAG.unlink()
+        datastore.SHUTDOWN_FLAG.unlink()
     except FileNotFoundError:
         pass
     except Exception:
         pass
-    listen_port = cfg.getint("proxy", "listen_port", fallback=3456)
-    logger.info("Launching mitmproxy on 0.0.0.0:%d", listen_port)
+    _ensure_token()
+    listen_host = cs.get(cfg, "proxy", "listen_host")
+    listen_port = cs.get(cfg, "proxy", "listen_port")
+    logger.info("Launching mitmproxy on %s:%d", listen_host, listen_port)
     threading.Thread(target=_check_update, daemon=True).start()
-    if cfg.getboolean("web", "web_enabled", fallback=True):
+    if cs.get(cfg, "web", "web_enabled"):
         threading.Thread(target=_start_web, daemon=True).start()
-    _watchdog(listen_port)
+    return _watchdog(listen_host, listen_port)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

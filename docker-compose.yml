@@ -1,30 +1,17 @@
-version: "3.9"
-
 services:
   newgreedy:
+    image: ghcr.io/mrt0t0/newgreedy:latest
     build: .
     container_name: newgreedy
     restart: unless-stopped
     ports:
-      - "3456:3456"
+      # proxy: this host only - containers on the same network use newgreedy:3456
+      - "127.0.0.1:3456:3456"
+      # web UI: a token is generated at the first start (docker compose logs newgreedy)
       - "8080:8080"
     volumes:
-      - ./config.ini:/app/config.ini
-      - ./stats.json:/app/stats.json
-      - ./torrent_registry.json:/app/torrent_registry.json
-      - ./newgreedy.log:/app/newgreedy.log
-      - ./static:/app/static
-      - ./control.json:/app/control.json
-      - ./torrents:/app/torrents
-      - mitmproxy_ca:/root/.mitmproxy
-    environment:
-      - PYTHONUNBUFFERED=1
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8080/api/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
+      - ./data:/app/data
+      - mitmproxy_ca:/home/newgreedy/.mitmproxy
 
 volumes:
   mitmproxy_ca:

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>NewGreedy — Logs</title>
-<link rel="stylesheet" href="/static/style.css?v=1.7.7">
+<link rel="stylesheet" href="/static/style.css?v=__NG_VERSION__">
 </head>
 <body>
 <nav>
@@ -15,6 +15,7 @@
     <a href="/charts"   data-page="charts">Charts</a>
     <a href="/config"   data-page="config">Config</a>
     <a href="/logs"     data-page="logs">Logs</a>
+    <a href="/status"   data-page="status">Status</a>
     <a href="/help"     data-page="help">Help</a>
   </div>
   <div class="nav-right">
@@ -65,7 +66,7 @@
 </div>
 
 </main>
-<script src="/static/app.js?v=1.7.7"></script>
+<script src="/static/app.js?v=__NG_VERSION__"></script>
 <script>
 if (typeof ngUrl !== 'function') {
   document.addEventListener('DOMContentLoaded', function () {
@@ -107,14 +108,21 @@ function lvlOk(cls){
   return true;
 }
 
+// counters kept up to date line by line, shown at most once per frame
+var COUNTERS={ls_tgt:/TARGET_REACHED/i, ls_stall:/STALL_NET/i, ls_stag:/\[STAG\]/i,
+              ls_cap:/GLOBAL_CAP/i, ls_td:/TRACKER_DOWN/i, ls_purge:/PURGED/i};
+var _counts={}, _statsQueued=false;
+function countLine(t,dir){
+  for(var id in COUNTERS){ if(COUNTERS[id].test(t)) _counts[id]=(_counts[id]||0)+dir; }
+}
 function updateStats(){
-  document.getElementById('ls_tot').textContent=_lines.length;
-  document.getElementById('ls_tgt').textContent=_lines.filter(l=>/TARGET_REACHED/i.test(l)).length;
-  document.getElementById('ls_stall').textContent=_lines.filter(l=>/STALL_NET/i.test(l)).length;
-  document.getElementById('ls_stag').textContent=_lines.filter(l=>/\[STAG\]/i.test(l)).length;
-  document.getElementById('ls_cap').textContent=_lines.filter(l=>/GLOBAL_CAP/i.test(l)).length;
-  document.getElementById('ls_td').textContent=_lines.filter(l=>/TRACKER_DOWN/i.test(l)).length;
-  document.getElementById('ls_purge').textContent=_lines.filter(l=>/PURGED/i.test(l)).length;
+  if(_statsQueued) return;
+  _statsQueued=true;
+  requestAnimationFrame(function(){
+    _statsQueued=false;
+    document.getElementById('ls_tot').textContent=_lines.length;
+    for(var id in COUNTERS) document.getElementById(id).textContent=_counts[id]||0;
+  });
 }
 
 function refreshTrackerBar(){
@@ -128,11 +136,11 @@ function refreshTrackerBar(){
         var pct=v.pct_of_cap||0;
         var col=pct>=90?'var(--er)':pct>=70?'var(--wa)':'var(--ok)';
         return '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:12px">'
-          +'<span class="mono" style="min-width:180px;color:var(--mu)">'+dom+'</span>'
+          +'<span class="mono" style="min-width:180px;color:var(--mu)">'+esc(dom)+'</span>'
           +'<div style="flex:1;height:6px;background:var(--bg3);border-radius:3px">'
           +'<div style="width:'+Math.min(100,pct).toFixed(1)+'%;height:100%;background:'+col+';border-radius:3px"></div></div>'
           +'<span style="min-width:50px;text-align:right;color:'+col+'">'+(v.ratio!=null?v.ratio.toFixed(3):'—')+'</span>'
-          +'<span style="color:var(--mu)">/ '+v.cap+'</span>'
+          +'<span style="color:var(--mu)">/ '+esc(v.cap)+'</span>'
           +'</div>';
       }).join('');
   }).catch(()=>{});
@@ -145,8 +153,9 @@ function extractHash(t){
 }
 
 function appendLine(t){
-  _lines.push(t);
-  if(_lines.length>_max) _lines.shift();
+  _lines.push(t); countLine(t,1);
+  if(_lines.length>_max) countLine(_lines.shift(),-1);
+  updateStats();
   // hash index
   var h=extractHash(t);
   if(h&&!_hashes.has(h)){
@@ -166,7 +175,6 @@ function appendLine(t){
   la.appendChild(d);
   while(la.children.length>_max) la.removeChild(la.firstChild);
   if(document.getElementById('autoscroll').checked) la.scrollTop=la.scrollHeight;
-  updateStats();
 }
 
 function rerender(){
@@ -186,7 +194,7 @@ function rerender(){
 document.getElementById('filterHash').addEventListener('change',rerender);
 document.getElementById('showAll').addEventListener('change',rerender);
 
-function clearL(){document.getElementById('logarea').innerHTML='';_lines=[];updateStats();}
+function clearL(){document.getElementById('logarea').innerHTML='';_lines=[];_counts={};updateStats();}
 function purgeL(){
   if(!confirm('Delete the contents of newgreedy.log on the server?')) return;
   API.del('/api/logs').then(()=>{clearL();}).catch(e=>alert('Error: '+e.message));

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>NewGreedy — Config</title>
-<link rel="stylesheet" href="/static/style.css?v=1.7.7">
+<link rel="stylesheet" href="/static/style.css?v=__NG_VERSION__">
 </head>
 <body>
 <nav>
@@ -15,6 +15,7 @@
     <a href="/charts"   data-page="charts">Charts</a>
     <a href="/config"   data-page="config">Config</a>
     <a href="/logs"     data-page="logs">Logs</a>
+    <a href="/status"   data-page="status">Status</a>
     <a href="/help"     data-page="help">Help</a>
   </div>
   <div class="nav-right">
@@ -49,7 +50,35 @@
   </div>
   <div class="alert hid" id="editalert"></div>
   <div class="muted" style="font-size:12px;margin-top:8px">
-    Changes are written to config.ini and reloaded immediately. Port changes still need a restart.
+    Changes are written to config.ini and applied by the running engine within 5 seconds.
+    Keys marked <span class="ic">restart</span> need a restart.
+  </div>
+</div>
+<div class="sec">
+  <div class="sec-t">🔑 Access</div>
+  <div id="tokinfo" class="muted" style="font-size:13px">Loading…</div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+    <button class="btn pri" onclick="rotateToken()">↻ Generate a new token</button>
+    <button class="btn dan" id="tokclear" onclick="clearToken()" style="display:none">Remove the token</button>
+    <button class="btn" id="logout" onclick="logout()" style="display:none">⎋ Log out</button>
+  </div>
+  <div id="toknew" class="alert hid"></div>
+  <div class="muted" style="font-size:12px;margin-top:8px">
+    The token is kept in an HttpOnly cookie after you log in; it never appears in page URLs.
+    A new token logs out every other browser.
+  </div>
+</div>
+<div class="sec">
+  <div class="sec-t">🔔 Notifications</div>
+  <div id="notinfo" class="muted" style="font-size:13px">Loading…</div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+    <button class="btn" onclick="testNotify()">✉ Send a test notification</button>
+  </div>
+  <div class="alert hid" id="notalert"></div>
+  <div class="muted" style="font-size:12px;margin-top:8px">
+    Set <span class="ic">notifications.webhook_url</span>, <span class="ic">webhook_format</span>
+    (generic, discord, slack, ntfy, gotify, telegram) and, for Telegram, <span class="ic">webhook_chat_id</span>
+    in the section above.
   </div>
 </div>
 <div class="sec">
@@ -66,13 +95,19 @@
 <div class="sec">
   <div class="sec-t">💾 Backup &amp; restore</div>
   <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-    <button class="btn pri" onclick="window.open(ngUrl('/api/backup'),'_blank')">⬇ Download backup</button>
-    <button class="btn" onclick="document.getElementById('rup').click()">⬆ Restore archive</button>
+    <button class="btn pri" onclick="makeBackup()">＋ Back up now</button>
+    <button class="btn" onclick="window.open(ngUrl('/api/backup'),'_blank')">⬇ Download current data</button>
+    <button class="btn" onclick="document.getElementById('rup').click()">⬆ Restore an archive…</button>
     <input type="file" id="rup" accept=".zip" style="display:none" onchange="restoreFiles(this.files)">
   </div>
+  <div class="muted" style="font-size:12px;margin:8px 0" id="bkinfo"></div>
+  <div class="twrap"><table>
+    <thead><tr><th>Archive</th><th>Kind</th><th>Size</th><th>Actions</th></tr></thead>
+    <tbody id="bkbody"><tr><td colspan="4" class="muted" style="padding:14px">Loading…</td></tr></tbody>
+  </table></div>
   <div class="muted" style="font-size:12px;margin-top:8px">
-    The archive contains config.ini, stats.json, torrent_registry.json and control.json.
-    Restoring overwrites them — restart NewGreedy afterwards.
+    An archive holds config.ini, stats.json, torrent_registry.json, control.json and trash.json.
+    Restoring saves the current data first, then the running engine picks the restored files up.
   </div>
   <div class="alert hid" id="bkalert"></div>
 </div>
@@ -85,14 +120,14 @@
        ondrop="event.preventDefault();this.classList.remove('over');handleFiles(event.dataTransfer.files)">
     <div style="font-size:26px">📁</div>
     <div class="up-title">Drag a .torrent here</div>
-    <div class="up-sub">Registers infohash + estimated size</div>
+    <div class="up-sub">Registers infohash + size</div>
   </div>
   <input type="file" id="fup" accept=".torrent" multiple style="display:none" onchange="handleFiles(this.files)">
   <div class="alert hid" id="upalert"></div>
 </div>
 
 </main>
-<script src="/static/app.js?v=1.7.7"></script>
+<script src="/static/app.js?v=__NG_VERSION__"></script>
 <script>
 if (typeof ngUrl !== 'function') {
   document.addEventListener('DOMContentLoaded', function () {
@@ -108,34 +143,41 @@ if (typeof ngUrl !== 'function') {
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 
-function sa(id,msg,t){var a=document.getElementById(id);a.textContent=msg;a.className='alert '+t;setTimeout(()=>a.className='alert hid',5000);}
+function sa(id,msg,t){var a=document.getElementById(id);a.textContent=msg;a.className='alert '+t;if(t!=='keep')setTimeout(()=>a.className='alert hid',6000);}
+var _cfg={};
 function loadCfg(){
   API.get('/api/config').then(c=>{
+    _cfg=c;
     document.getElementById('cfgview').value=JSON.stringify(c,null,2);
+    var n=c.notifications||{};
+    document.getElementById('notinfo').textContent=n.webhook_url
+      ? 'Format '+(n.webhook_format||'generic')+' — events: '+(n.webhook_events||'none')
+      : 'No webhook_url set — notifications are off.';
   }).catch(e=>sa('cfgalert','Error: '+e.message,'er'));
 }
 function reload(){
   API.post('/api/config/reload',{}).then(d=>{
-    sa('cfgalert','✓ Reloaded — '+JSON.stringify(d),'ok'); loadCfg();
+    sa('cfgalert','✓ Reloaded — '+d.note,'ok'); loadCfg();
   }).catch(e=>sa('cfgalert','Error: '+e.message,'er'));
 }
 function handleFiles(files){
   Array.from(files).forEach(f=>{
-    var fd=new FormData(); fd.append('file',f);
-    fetch(ngUrl('/api/upload'),{method:'POST',body:fd}).then(r=>r.json())
+    API.upload('/api/upload',f)
       .then(d=>sa('upalert','✓ '+f.name+' — ih:'+d.infohash+' '+fB(d.size_estimate),'ok'))
-      .catch(e=>sa('upalert','✗ '+e.message,'er'));
+      .catch(e=>sa('upalert','✗ '+f.name+': '+e.message,'er'));
   });
 }
+var _restartKeys=[];
 function loadEditable(){
   Promise.all([API.get('/api/config/editable'),API.get('/api/config')]).then(function(res){
     var keys=res[0].keys||[], cfg=res[1]||{};
-    var sel=document.getElementById('ekey');
+    _restartKeys=res[0].restart||[];
+    var sel=document.getElementById('ekey'), prev=sel.value;
     sel.innerHTML='';
     keys.forEach(function(k){
       var parts=k.split('.'), cur=(cfg[parts[0]]||{})[parts[1]];
       var o=document.createElement('option');
-      o.value=k; o.textContent=k+(cur!==undefined?'  ('+cur+')':'');
+      o.value=k; o.textContent=k+(cur!==undefined?'  ('+cur+')':'')+(_restartKeys.indexOf(k)>-1?'  [restart]':'');
       o.dataset.cur=cur===undefined?'':cur;
       sel.appendChild(o);
     });
@@ -143,6 +185,7 @@ function loadEditable(){
       var o=sel.options[sel.selectedIndex];
       document.getElementById('eval').value=o?o.dataset.cur:'';
     };
+    if(prev) sel.value=prev;
     if(sel.options.length) sel.onchange();
   }).catch(function(e){sa('editalert','Error: '+e.message,'er');});
 }
@@ -152,33 +195,89 @@ function saveKey(){
   if(!k){sa('editalert','Select a key first','er');return;}
   var p=k.split('.');
   API.post('/api/config/set',{section:p[0],key:p[1],value:v}).then(function(d){
-    if(d.error){sa('editalert','✗ '+d.error,'er');return;}
-    sa('editalert','✓ '+k+' = '+d.value,'ok');
+    sa('editalert','✓ '+k+' = '+d.value+' — '+d.note,'ok');
     loadCfg(); loadEditable();
-  }).catch(function(e){sa('editalert','Error: '+e.message,'er');});
+  }).catch(function(e){sa('editalert','✗ '+e.message,'er');});
 }
 function loadProfiles(){
   API.get('/api/profiles').then(p=>{
     var rows=Object.entries(p).map(([k,v])=>
-      '<tr><td class="mono">'+k+'</td><td class="muted" style="white-space:normal">'
-      +v.user_agents.join('<br>')+'</td><td class="mono muted">'+v.numwant+'</td></tr>').join('');
+      '<tr><td class="mono">'+esc(k)+'</td><td class="muted" style="white-space:normal">'
+      +v.user_agents.map(esc).join('<br>')+'</td><td class="mono muted">'+esc(v.numwant)+'</td></tr>').join('');
     document.getElementById('profbody').innerHTML=rows||'<tr><td colspan="3" class="muted">None</td></tr>';
   }).catch(()=>{});
 }
+function loadToken(){
+  API.get('/api/token').then(t=>{
+    document.getElementById('tokinfo').textContent=t.enabled
+      ? 'Token required (ends with '+t.hint+'). The web UI listens on '+t.web_host+'.'
+      : 'No token — the web UI only listens on '+t.web_host+', this machine.';
+    document.getElementById('tokclear').style.display=(t.enabled&&t.loopback)?'':'none';
+    document.getElementById('logout').style.display=t.enabled?'':'none';
+  }).catch(e=>{document.getElementById('tokinfo').textContent='Error: '+e.message;});
+}
+function rotateToken(){
+  if(!confirm('Generate a new token? Every other browser and script using the old one is logged out.')) return;
+  API.post('/api/token/rotate',{}).then(d=>{
+    sa('toknew','New token: '+d.token+' — '+d.note,'keep');
+    document.getElementById('toknew').className='alert ok';
+    loadToken();
+  }).catch(e=>sa('toknew','Error: '+e.message,'er'));
+}
+function clearToken(){
+  if(!confirm('Remove the token? The web UI stays reachable from this machine only.')) return;
+  API.post('/api/token/clear',{}).then(()=>{loadToken();}).catch(e=>sa('toknew','Error: '+e.message,'er'));
+}
+function logout(){API.post('/api/logout',{}).then(()=>location.reload());}
+function testNotify(){
+  sa('notalert','Sending…','ok');
+  API.post('/api/notify/test',{}).then(d=>sa('notalert','✓ Delivered ('+d.detail+')','ok'))
+    .catch(e=>sa('notalert','✗ '+e.message,'er'));
+}
+function loadBackups(){
+  API.get('/api/backups').then(b=>{
+    document.getElementById('bkinfo').textContent=(b.auto
+      ? 'Automatic backup every '+b.interval_hours+' h, '+b.keep+' kept'
+      : 'Automatic backups are off')+' — folder '+b.folder;
+    var rows=(b.backups||[]).map(x=>{
+      var n=esc(x.name);
+      return '<tr><td class="mono">'+n+'</td><td class="muted">'+esc(x.reason)+'</td><td class="mono muted">'+fB(x.size)+'</td>'
+        +'<td><a class="btn" href="'+ngUrl('/api/backups/'+encodeURIComponent(x.name))+'">⬇</a> '
+        +'<button class="btn" onclick="restoreBackup(\''+n+'\')">↩ Restore</button> '
+        +'<button class="btn dan" onclick="deleteBackup(\''+n+'\')">✕</button></td></tr>';
+    }).join('');
+    document.getElementById('bkbody').innerHTML=rows||'<tr><td colspan="4" class="muted" style="padding:14px">No backup yet</td></tr>';
+  }).catch(e=>sa('bkalert','Error: '+e.message,'er'));
+}
+function makeBackup(){
+  API.post('/api/backups',{}).then(d=>{sa('bkalert','✓ '+d.created,'ok');loadBackups();})
+    .catch(e=>sa('bkalert','✗ '+e.message,'er'));
+}
+function restoreDone(d){
+  sa('bkalert','✓ Restored: '+d.restored.join(', ')+' — '+d.note,'ok');
+  loadCfg(); loadEditable(); loadBackups();
+}
+function restoreBackup(name){
+  if(!confirm('Restore '+name+'?\nThe current data is backed up first.')) return;
+  API.post('/api/backups/'+encodeURIComponent(name)+'/restore',{}).then(restoreDone)
+    .catch(e=>sa('bkalert','✗ '+e.message,'er'));
+}
+function deleteBackup(name){
+  if(!confirm('Delete '+name+'?')) return;
+  API.del('/api/backups/'+encodeURIComponent(name)).then(loadBackups)
+    .catch(e=>sa('bkalert','✗ '+e.message,'er'));
+}
 function restoreFiles(files){
   if(!files||!files.length) return;
-  var fd=new FormData(); fd.append('file',files[0]);
-  fetch(ngUrl('/api/restore'),{method:'POST',body:fd}).then(r=>r.json())
-    .then(d=>{
-      if(d.error){sa('bkalert','✗ '+d.error,'er');return;}
-      sa('bkalert','✓ Restored: '+d.restored.join(', ')+' — restart NewGreedy to apply','ok');
-      loadCfg(); loadEditable();
-    })
+  if(!confirm('Restore '+files[0].name+'?\nThe current data is backed up first.')) return;
+  API.upload('/api/restore',files[0]).then(restoreDone)
     .catch(e=>sa('bkalert','✗ '+e.message,'er'));
 }
 loadCfg();
 loadEditable();
 loadProfiles();
+loadToken();
+loadBackups();
 
 initUI('config');
 </script>

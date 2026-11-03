@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NewGreedy — Sign in</title>
+<link rel="stylesheet" href="/static/style.css?v=__NG_VERSION__">
+</head>
+<body>
+<main>
+<div class="sec login">
+  <div class="sec-t">🔑 NewGreedy — access token</div>
+  <form id="f">
+    <label class="flbl" for="tok">Token (web_secret_token in config.ini)</label>
+    <input id="tok" type="password" autocomplete="current-password" autofocus>
+    <div style="margin-top:12px"><button class="btn pri" type="submit">Sign in</button></div>
+  </form>
+  <div class="alert hid" id="err"></div>
+  <div class="muted" style="font-size:12px;margin-top:12px">
+    The token was printed in the console at the first start and is stored in config.ini.
+    After signing in it is kept in a cookie for this browser.
+  </div>
+</div>
+</main>
+<script>
+(function(){
+  var base=location.pathname.replace(/\/+$/,'').replace(/\/(torrents|charts|config|logs|help|status)$/,'');
+  try{if(localStorage.getItem('ng_theme')==='light')document.body.classList.add('light');}catch(e){}
+  document.getElementById('f').addEventListener('submit',function(ev){
+    ev.preventDefault();
+    fetch(base+'/api/login',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({token:document.getElementById('tok').value})})
+    .then(function(r){return r.json().then(function(d){return [r.ok,d];});})
+    .then(function(x){
+      if(x[0]){location.reload();return;}
+      var e=document.getElementById('err');e.textContent=x[1].error||'Refused';e.className='alert er';
+    }).catch(function(e){var el=document.getElementById('err');el.textContent=e.message;el.className='alert er';});
+  });
+})();
+</script>
+</body>
+</html>

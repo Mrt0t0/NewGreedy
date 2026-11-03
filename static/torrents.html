@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>NewGreedy — Torrents</title>
-<link rel="stylesheet" href="/static/style.css?v=1.7.7">
+<link rel="stylesheet" href="/static/style.css?v=__NG_VERSION__">
 <style>
 th.sortable{cursor:pointer;user-select:none}
 th.sortable:hover{color:var(--tx)}
@@ -25,6 +25,7 @@ th.sortable.desc::after{content:'\2193';opacity:1}
     <a href="/charts"   data-page="charts">Charts</a>
     <a href="/config"   data-page="config">Config</a>
     <a href="/logs"     data-page="logs">Logs</a>
+    <a href="/status"   data-page="status">Status</a>
     <a href="/help"     data-page="help">Help</a>
   </div>
   <div class="nav-right">
@@ -61,7 +62,7 @@ th.sortable.desc::after{content:'\2193';opacity:1}
   <button class="btn" onclick="window.open(ngUrl('/api/backup'),'_blank')">💾 Backup</button>
   <button class="btn dan" onclick="purge()">🗑 Purge done</button>
   <button class="btn dan" onclick="purgeInactive()">⏱ Purge inactive 12h</button>
-  <button class="btn" onclick="window.open('/api/stats/csv','_blank')">⬇ CSV</button>
+  <button class="btn" onclick="window.open(ngUrl('/api/stats/csv'),'_blank')">⬇ CSV</button>
   <button class="btn" onclick="load()">⟳ Refresh</button>
 </div>
 <div class="twrap">
@@ -85,8 +86,22 @@ th.sortable.desc::after{content:'\2193';opacity:1}
 </div>
 <div class="ts" id="ts" style="margin-top:8px"></div>
 
+<div class="sec" style="margin-top:20px">
+  <div class="sec-t">🗑 Trash — purged torrents, restorable for <span id="trash_days">—</span> day(s)</div>
+  <div class="toolbar" style="margin-bottom:10px">
+    <span class="muted" style="font-size:12px" id="trash_count">—</span>
+    <span class="spacer"></span>
+    <button class="btn" onclick="loadTrash()">⟳ Refresh</button>
+    <button class="btn dan" onclick="emptyTrash()">Empty trash</button>
+  </div>
+  <div class="twrap"><table>
+    <thead><tr><th>Torrent</th><th>Removed</th><th>Why</th><th>Inj. UL</th><th>DL</th><th>Ann#</th><th>Actions</th></tr></thead>
+    <tbody id="trashbody"><tr><td colspan="7" class="muted" style="padding:14px">Loading…</td></tr></tbody>
+  </table></div>
+</div>
+
 </main>
-<script src="/static/app.js?v=1.7.7"></script>
+<script src="/static/app.js?v=__NG_VERSION__"></script>
 <script>
 if (typeof ngUrl !== 'function') {
   document.addEventListener('DOMContentLoaded', function () {
@@ -102,7 +117,7 @@ if (typeof ngUrl !== 'function') {
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 
-var _data={}, _filter='all', _tgt=1.6;
+var _data={}, _filter='all', _tgt=1.6, _seedMb=500;
 function setF(f,el){
   _filter=f;
   document.querySelectorAll('.toolbar .btn').forEach(b=>b.classList.remove('active'));
@@ -137,6 +152,25 @@ function matchQ(ih,d,q){
 function togglePause(ih,cur){
   API.post('/api/control/pause',{hash:ih,paused:!cur}).then(load)
     .catch(e=>alert('Error: '+e.message));
+}
+function act(kind,ih){
+  var d=_data[ih]||{};
+  if(kind==='pause') return togglePause(ih,!!d.paused);
+  if(kind==='ratio') return editRatio(ih,d);
+  if(kind==='tags')  return editTags(ih,d);
+  if(kind==='del')   return delTorrent(ih,d);
+}
+function delTorrent(ih,d){
+  if(!confirm('Remove '+(d.name||ih)+' from the stats?\nIt goes to the trash and can be restored.')) return;
+  API.del('/api/stats/'+encodeURIComponent(ih)).then(()=>{sa('Moved to the trash: '+(d.name||ih),'ok');setTimeout(()=>{load();loadTrash();},1500);})
+    .catch(e=>sa('Error: '+e.message,'er'));
+}
+function actCell(ih,d){
+  var h=esc(ih);
+  return '<button class="btn" title="'+(d.paused?'Resume injection':'Pause injection')+'" onclick="act(\'pause\',\''+h+'\')">'+(d.paused?'▶':'⏸')+'</button> '
+    +'<button class="btn" title="Target ratio override" onclick="act(\'ratio\',\''+h+'\')">R</button> '
+    +'<button class="btn" title="Tags" onclick="act(\'tags\',\''+h+'\')">🏷</button> '
+    +'<button class="btn dan" title="Remove (to trash)" onclick="act(\'del\',\''+h+'\')">✕</button>';
 }
 function editRatio(ih,d){
   var cur=(d.override&&d.override.target_ratio)||'';
@@ -178,18 +212,19 @@ function render(){
       ? Math.round(Math.max(0,d.cumul_rep_dl*_tgt-d.cumul_rep_ul)/(d.cumul_rep_ul/d.ann_count))
       : 0;
     return '<tr>'
-      +'<td class="mono"><a href="'+ngUrl('/charts?ih='+ih)+'" title="'+ih+'" style="color:var(--mu)">'+fName(d,ih)+'</a>'+(d.has_udp?' <span class="tag stall" title="This torrent uses UDP trackers which bypass NewGreedy">UDP</span>':'')+(d.override&&d.override.target_ratio?' <span class="tagchip" title="Ratio override">R'+d.override.target_ratio+'</span>':'')+((d.tags||[]).map(t=>' <span class="tagchip">'+t+'</span>').join(''))+'</td>'
+      +'<td class="mono"><a href="'+ngUrl('/charts?ih='+encodeURIComponent(ih))+'" title="'+esc(ih)+'" style="color:var(--mu)">'+fName(d,ih)+'</a>'+(d.has_udp?' <span class="tag stall" title="This torrent uses UDP trackers which bypass NewGreedy">UDP</span>':'')+(d.paused?' <span class="tag stag">Paused</span>':'')+(d.override&&d.override.target_ratio?' <span class="tagchip" title="Ratio override">R'+esc(d.override.target_ratio)+'</span>':'')+((d.tags||[]).map(t=>' <span class="tagchip">'+esc(t)+'</span>').join(''))+'</td>'
       +'<td>'+modeTxt(d)+'</td>'
       +'<td class="mono">'+(d.cumul_rep_dl>0?fB(d.cumul_rep_dl):'<span class="muted">—</span>')+'</td>'
       +'<td class="mono muted">'+fB(d.cumul_real_ul||0)+'</td>'
       +'<td class="mono">'+fB(d.cumul_rep_ul)+'</td>'
       +'<td class="mono">'+(r!=null?fR(r):'<span class="muted">—</span>')+'</td>'
-      +'<td>'+rbar(r,_tgt)+'</td>'
+      +'<td>'+progBar(d,_tgt,_seedMb)+'</td>'
       +'<td class="mono muted">'+fE(eta)+'</td>'
       +'<td class="mono muted">'+(d.ann_count||0)+'</td>'
       +'<td class="mono muted">'+trkCell(d)+'</td>'
       +'<td class="mono muted">'+fAge(d.last_announce_ts)+'</td>'
       +'<td>'+stag(d)+'</td>'
+      +'<td style="white-space:nowrap">'+actCell(ih,d)+'</td>'
       +'</tr>';
   }).join('');
 }
@@ -200,23 +235,21 @@ function sa(msg,type){
 }
 function handleFiles(files){
   Array.from(files).forEach(f=>{
-    var fd=new FormData(); fd.append('file',f);
-    fetch(ngUrl('/api/upload'),{method:'POST',body:fd})
-      .then(r=>r.json())
-      .then(d=>sa('✓ '+f.name+' — ih:'+d.infohash+' size:'+fB(d.size_estimate),'ok'))
+    API.upload('/api/upload',f)
+      .then(d=>sa('✓ '+f.name+' — ih:'+d.infohash+' size:'+fB(d.size_estimate)+(d.udp_warning?' — uses UDP trackers (not intercepted)':''),'ok'))
       .catch(e=>sa('✗ '+f.name+': '+e.message,'er'));
   });
 }
 function purgeInactive(){
-  if(!confirm('Remove torrents with no announce in the last 12 hours?')) return;
+  if(!confirm('Remove torrents with no announce in the last 12 hours?\nThey go to the trash.')) return;
   API.del('/api/stats/purge?keep_active=true&inactive_hours=12')
-    .then(d=>{sa('Purged: '+JSON.stringify(d),'ok'); setTimeout(load,600);})
+    .then(d=>{sa('Moved to the trash: '+d.purged+' — remaining: '+d.remaining,'ok'); setTimeout(()=>{load();loadTrash();},1500);})
     .catch(e=>sa('Error: '+e.message,'er'));
 }
 function purge(){
-  if(!confirm('Remove all stopped/finished torrents from stats?')) return;
+  if(!confirm('Remove all torrents that reached their target from stats?\nThey go to the trash.')) return;
   API.del('/api/stats/purge')
-    .then(d=>{sa('Purged: '+JSON.stringify(d),'ok'); setTimeout(load,600);})
+    .then(d=>{sa('Moved to the trash: '+d.purged+' — remaining: '+d.remaining,'ok'); setTimeout(()=>{load();loadTrash();},1500);})
     .catch(e=>sa('Error: '+e.message,'er'));
 }
 function trkCell(d){
@@ -228,21 +261,56 @@ function trkCell(d){
     var r=(v.dl>0)?(v.ul/v.dl).toFixed(2):'—';
     return n+'  UL '+fB(v.ul)+'  R '+r;
   }).join('\n');
-  return '<span title="'+tip.replace(/"/g,'&quot;')+'">'+names.length+'</span>';
+  return '<span title="'+esc(tip)+'">'+names.length+'</span>';
 }
 function load(){
   Promise.all([API.get('/api/stats'),API.get('/api/config')])
   .then(([s,c])=>{
     _data=s;
     _tgt=parseFloat((c.spoofing&&c.spoofing.target_ratio)||1.6)||1.6;
+    _seedMb=parseFloat((c.spoofing&&c.spoofing.seed_target_mb)||500)||0;
     document.getElementById('ts').textContent='Updated '+new Date().toLocaleTimeString();
     render();
   })
   .catch(e=>{
-    document.getElementById('tbody').innerHTML='<tr><td colspan="13" style="text-align:center;padding:20px;color:var(--er)">API error: '+e.message+'</td></tr>';
+    document.getElementById('tbody').innerHTML='<tr><td colspan="13" style="text-align:center;padding:20px;color:var(--er)">API error: '+esc(e.message)+'</td></tr>';
   });
 }
+function loadTrash(){
+  API.get('/api/trash').then(t=>{
+    document.getElementById('trash_days').textContent=t.retention_days;
+    var items=t.items||[];
+    document.getElementById('trash_count').textContent=items.length+' item(s)'+(t.retention_days>0?'':' — trash disabled (trash_retention_days = 0)');
+    var tb=document.getElementById('trashbody');
+    if(!items.length){tb.innerHTML='<tr><td colspan="7" class="muted" style="padding:14px">Empty</td></tr>';return;}
+    tb.innerHTML=items.map(it=>{
+      var h=esc(it.hash);
+      return '<tr><td class="mono">'+fName(it,it.hash)+'</td>'
+        +'<td class="mono muted">'+fAge(it.deleted_at)+'</td>'
+        +'<td class="muted">'+esc(it.reason)+'</td>'
+        +'<td class="mono">'+fB(it.cumul_rep_ul)+'</td>'
+        +'<td class="mono">'+fB(it.cumul_rep_dl)+'</td>'
+        +'<td class="mono muted">'+esc(it.ann_count)+'</td>'
+        +'<td><button class="btn" onclick="trashRestore(\''+h+'\')">↩ Restore</button> '
+        +'<button class="btn dan" onclick="trashDelete(\''+h+'\')">Delete</button></td></tr>';
+    }).join('');
+  }).catch(e=>{document.getElementById('trashbody').innerHTML='<tr><td colspan="7" style="color:var(--er)">'+esc(e.message)+'</td></tr>';});
+}
+function trashRestore(ih){
+  API.post('/api/trash/'+encodeURIComponent(ih)+'/restore',{})
+    .then(d=>{sa('↩ '+ih+' restored — '+d.note,'ok');setTimeout(()=>{load();loadTrash();},2000);})
+    .catch(e=>sa('Error: '+e.message,'er'));
+}
+function trashDelete(ih){
+  if(!confirm('Delete '+ih+' for good?')) return;
+  API.del('/api/trash/'+encodeURIComponent(ih)).then(loadTrash).catch(e=>sa('Error: '+e.message,'er'));
+}
+function emptyTrash(){
+  if(!confirm('Delete everything in the trash for good?')) return;
+  API.del('/api/trash').then(loadTrash).catch(e=>sa('Error: '+e.message,'er'));
+}
 load(); setInterval(load,15000);
+loadTrash();
 
 initUI('torrents');
 </script>

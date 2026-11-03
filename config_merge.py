@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NewGreedy v1.7.7 — config.ini migration between versions"""
+"""NewGreedy — config.ini migration between versions"""
 #
 # NewGreedy - BitTorrent announce proxy
 # Copyright (C) 2026  Mrt0t0
@@ -21,13 +21,39 @@ import argparse
 import configparser
 import sys
 
-FORCED_DEFAULTS = {("anti_detection", "intercept_scrape"): "false"}
-FORCED_REASON   = "v1.7.7 default, a client that never scrapes stands out"
-CARRIED_NOTE    = "; carried over from your previous config.ini"
+# {(section, key): (new_default, since_version, reason)} - applied once, to a
+# config.ini written by a version older than since_version
+FORCED_DEFAULTS = {}
+# keys retired from config.ini: dropped from the merged file instead of carried over
+REMOVED_KEYS = {
+    ("proxy", "tracker_timeout"), ("spoofing", "upload_mode"), ("spoofing", "seeding_dl_ratio"),
+    ("anti_detection", "peer_variance"), ("anti_detection", "intercept_scrape"),
+    ("advanced", "multi_tracker_delay_min"), ("advanced", "multi_tracker_delay_max"),
+    ("advanced", "event_anomaly_probability"),
+}
+VERSION_KEY  = ("meta", "config_version")
+CARRIED_NOTE = "; carried over from your previous config.ini"
+
+
+def _vtuple(v):
+    parts = []
+    for p in (v or "").lstrip("v").split("."):
+        parts.append(int(p) if p.isdigit() else 0)
+    return tuple((parts + [0, 0, 0])[:3])
+
+
+def config_version(c):
+    """Version that wrote this config.ini; guessed for files older than the [meta] section."""
+    if c.has_option(*VERSION_KEY):
+        return c.get(*VERSION_KEY)
+    if c.has_option("client", "session_identity"):
+        return "v1.7.7"
+    return "v1.7.6" if c.sections() else ""
 
 
 def _parse(text):
-    c = configparser.ConfigParser(inline_comment_prefixes=(";", "#"), interpolation=None)
+    c = configparser.ConfigParser(inline_comment_prefixes=(";", "#"), interpolation=None,
+                                  strict=False)
     c.read_string(text)
     return c
 
@@ -74,11 +100,15 @@ def _carry_over(lines, carried):
     return lines
 
 
-def _verify(merged, old, forced):
+def _skip(section, key, forced, applied):
+    return (section, key) in applied or (section, key) in REMOVED_KEYS or (section, key) == VERSION_KEY
+
+
+def _verify(merged, old, forced, applied):
     check = _parse(merged)
     for section in old.sections():
         for key in old[section]:
-            if (section, key) in forced:
+            if _skip(section, key, forced, applied):
                 continue
             if not check.has_option(section, key):
                 raise ValueError(f"[{section}] {key} was lost in the merge")
@@ -90,17 +120,25 @@ def _verify(merged, old, forced):
 def merge(shipped_text, current_text, forced=None):
     forced = FORCED_DEFAULTS if forced is None else forced
     new, old = _parse(shipped_text), _parse(current_text)
+    old_version = _vtuple(config_version(old)) if current_text.strip() else (0, 0, 0)
+    applied = {k for k, (_, since, _) in forced.items() if old_version < _vtuple(since)}
 
-    kept, added, changed, carried = [], [], [], []
+    kept, added, changed, carried, removed = [], [], [], [], []
     for section in new.sections():
         for key in new[section]:
+            if (section, key) == VERSION_KEY:
+                continue
             if old.has_option(section, key):
                 kept.append((section, key))
             else:
                 added.append((section, key, new[section][key]))
     for section in old.sections():
         for key in old[section]:
-            if not new.has_option(section, key):
+            if new.has_option(section, key):
+                continue
+            if (section, key) in REMOVED_KEYS:
+                removed.append((section, key, old[section][key]))
+            else:
                 carried.append((section, key, old[section][key]))
 
     lines = shipped_text.splitlines()
@@ -114,27 +152,41 @@ def merge(shipped_text, current_text, forced=None):
             continue
         lhs = line.split("=", 1)[0]
         key = lhs.strip()
-        want = forced.get((section, key))
-        if want is not None:
+        if (section, key) == VERSION_KEY:
+            continue
+        if (section, key) in applied:
+            want, _, reason = forced[(section, key)]
             if old.has_option(section, key) and old[section][key].strip().lower() != want:
-                changed.append((section, key, old[section][key], want))
+                changed.append((section, key, old[section][key], want, reason))
             lines[i] = _assign(lhs, want)
             continue
         if old.has_option(section, key):
             lines[i] = _assign(lhs, old[section][key])
 
     merged = "\n".join(_carry_over(lines, carried)).rstrip("\n") + "\n"
-    _verify(merged, old, forced)
-    return merged, {"kept": kept, "added": added, "changed": changed, "carried": carried}
+    _verify(merged, old, forced, applied)
+    return merged, {"kept": kept, "added": added, "changed": changed, "carried": carried,
+                    "removed": removed, "from": config_version(old) or "none",
+                    "to": new.get(*VERSION_KEY, fallback="")}
+
+
+def needs_merge(shipped_text, current_text):
+    new, old = _parse(shipped_text), _parse(current_text)
+    if new.get(*VERSION_KEY, fallback="") != old.get(*VERSION_KEY, fallback=""):
+        return True
+    return any(not old.has_option(s, k) for s in new.sections() for k in new[s])
 
 
 def format_report(report):
-    out = [f"kept    {len(report['kept'])} setting(s) from the current config.ini",
+    out = [f"config.ini {report.get('from', '?')} -> {report.get('to') or 'current'}",
+           f"kept    {len(report['kept'])} setting(s) from the current config.ini",
            f"added   {len(report['added'])} new key(s)"]
     for section, key, value in report["added"]:
         out.append(f"  + [{section}] {key} = {value}")
-    for section, key, was, now in report["changed"]:
-        out.append(f"  ~ [{section}] {key}: {was} -> {now}   ({FORCED_REASON})")
+    for section, key, was, now, reason in report["changed"]:
+        out.append(f"  ~ [{section}] {key}: {was} -> {now}   ({reason})")
+    for section, key, value in report.get("removed", []):
+        out.append(f"  - [{section}] {key} = {value}   (retired, no longer read)")
     for section, key, value in report["carried"]:
         out.append(f"  ? [{section}] {key} = {value}   (unknown in this version, kept)")
     return out
@@ -164,10 +216,10 @@ def main(argv=None):
     p.add_argument("--shipped", required=True, help="config.ini of the new version")
     p.add_argument("--current", required=True, help="config.ini already installed")
     p.add_argument("--out", help="where to write the result; omit for a preview")
-    p.add_argument("--keep-scrape", action="store_true",
-                   help="leave intercept_scrape as it is instead of applying the new default")
+    p.add_argument("--keep-defaults", "--keep-scrape", action="store_true", dest="keep",
+                   help="never apply a new default over one of your values")
     args = p.parse_args(argv)
-    forced = {} if args.keep_scrape else FORCED_DEFAULTS
+    forced = {} if args.keep else FORCED_DEFAULTS
     try:
         report = merge_files(args.shipped, args.current, args.out, forced)
     except (OSError, ValueError, configparser.Error) as e:

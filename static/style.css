@@ -95,4 +95,11 @@ textarea{resize:vertical;min-height:80px}
 .ic{background:var(--bg3);border:1px solid var(--bd);border-radius:3px;padding:1px 5px;font-family:var(--mono);font-size:12px}
 @media(max-width:640px){nav{gap:6px;padding:0 12px}.nav-links a{padding:5px 6px;font-size:12px}main{padding:12px}.cards{grid-template-columns:1fr 1fr}}
 
-/* NewGreedy v1.7.7 — single shared stylesheet */
+/* NewGreedy — single shared stylesheet */
+.tagchip{display:inline-block;font-size:10px;padding:1px 6px;border-radius:20px;background:var(--bg3);border:1px solid var(--bd);color:var(--mu)}
+.chk{display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-bottom:1px solid var(--bd);font-size:13px}
+.chk:last-child{border-bottom:none}
+.chk .lv{flex-shrink:0;width:56px;text-align:center}
+.chk .dt{color:var(--mu);font-size:12px;word-break:break-word}
+.relnotes{white-space:pre-wrap;font-family:var(--mono);font-size:12px;max-height:320px;overflow:auto;background:var(--bg);border:1px solid var(--bd);border-radius:var(--r);padding:10px;margin-top:10px}
+.login{max-width:380px;margin:12vh auto}

@@ -4,7 +4,7 @@
 
 ### BitTorrent announce proxy — Upload ratio spoofer
 
-[![Version](https://img.shields.io/badge/version-1.7.7-blue?style=flat-square)](https://github.com/Mrt0t0/NewGreedy/releases)
+[![Version](https://img.shields.io/badge/version-1.7.8-blue?style=flat-square)](https://github.com/Mrt0t0/NewGreedy/releases)
 [![Python](https://img.shields.io/badge/python-3.9%2B-green?style=flat-square)](https://python.org)
 [![License](https://img.shields.io/badge/license-GPLv3-gray?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows%20%7C%20Docker-lightgray?style=flat-square)](https://github.com/Mrt0t0/NewGreedy)
@@ -64,20 +64,24 @@ Your torrent client and the files on disk are **never touched**. Only the statis
 
 **Control**
 - Pause, ratio override and tags per torrent, applied within seconds without a restart
-- `[tracker:domain]` sections to set different rules for one tracker
+- `[tracker:domain]` sections to set different rules for one tracker, kept across restarts
 - Watch folder: drop `.torrent` files to register their name, size and trackers
+- Settings applied live: `config.ini` is reloaded by the running engine within 5 s
+- Purged torrents go to a trash and can be restored for `trash_retention_days`
 - Dry-run mode that logs every decision without changing a single announce
 
 **Web UI and integrations**
-- Dashboard, sortable torrents table, ratio charts, live logs and settings editor
+- Dashboard, sortable torrents table with per-torrent actions, ratio charts, live logs and settings editor
+- Status page: self-check, engine state, live "announce received" test and client setup guide
 - REST API and Prometheus `/metrics`
-- Webhooks to Discord, Slack or any JSON endpoint
-- Upstream proxy such as Gluetun; optional access token, hidden path and rate limiting
+- Webhooks to Discord, Slack, ntfy, Gotify, Telegram or any JSON endpoint, with a test button
+- Upstream proxy such as Gluetun; access token with sign-in page, hidden path and rate limiting
 
 **Operations**
-- Installers for Linux (systemd), macOS (launchd) and Windows (Task Scheduler), plus Docker
-- Update from the command line or in one click from the web UI — settings merged, data kept
-- Backup and restore archive, atomic writes, log rotation, clean flush on shutdown
+- Installers for Linux (systemd, dedicated service account, venv), macOS (launchd) and Windows (Task Scheduler), plus a Docker image
+- Update from the command line or in one click from the web UI — release notes shown first, checksum required, settings merged, data kept
+- Automatic rotating backups, restore in one click, atomic writes, log rotation, clean flush on shutdown
+- `--check-config` self-check; the engine fails closed instead of letting announces through unmodified
 - UDP trackers detected and flagged, since their announces bypass the proxy
 
 ---
@@ -128,12 +132,13 @@ Injection stops automatically when `target_ratio` is reached (`auto_stop_at_targ
 
 | Dependency | Version |
 |---|---|
-| Python | 3.9+ (3.11 recommended) |
-| mitmproxy | 10.0+ |
+| Python | 3.10+ (3.12 or newer for mitmproxy 12) |
+| mitmproxy | 10.0 to 12.x — on Python 3.14, only mitmproxy 12 installs |
 | fastapi | 0.110+ |
 | uvicorn | 0.27+ |
 | python-multipart | 0.0.9+ |
-| bcrypt | 4.x (**not** 5.x — see [Troubleshooting](#troubleshooting)) |
+
+`bcrypt` is no longer pinned. With mitmproxy 10 or 11, **bcrypt 5.x** breaks the passlib they use: remove it — see [Troubleshooting](#troubleshooting). mitmproxy 12 needs bcrypt 5 itself and no longer uses passlib.
 
 ---
 
@@ -157,23 +162,32 @@ sudo ./install.sh
 ```
 
 The installer:
-- Installs Python dependencies via `pip`
+- Creates a system account `newgreedy` — the service no longer runs as root
+- Installs Python dependencies in a virtual environment, `/opt/newgreedy/venv` (falls back to the system Python when `python3-venv` is missing)
 - Copies all files to `/opt/newgreedy/`
-- Generates the mitmproxy CA certificate and adds it to the system trust store
+- Generates the mitmproxy CA in `/var/lib/newgreedy/mitmproxy` — key readable by `newgreedy` only. It is **not** added to the system trust store unless you pass `--trust-ca` (see step 4)
+- Merges an existing `config.ini` instead of replacing it, whether or not `--update` is given
 - Creates and enables a `systemd` service (`newgreedy.service`) that starts at boot
 
 **3. Verify**
 
 ```bash
 systemctl status newgreedy
+sudo -u newgreedy NEWGREEDY_MITM_CONFDIR=/var/lib/newgreedy/mitmproxy \
+  /opt/newgreedy/venv/bin/python /opt/newgreedy/newgreedy.py --check-config
 xdg-open http://localhost:8080
 ```
 
-**4. Trust the CA in your browser**
+The **Status** page runs the same checks while the service is up.
 
-The CA is automatically added to the OS trust store. For browsers with their own store (Firefox):
-- File: `/usr/local/share/ca-certificates/mitmproxy-ca.crt`
-- Firefox → Settings → Privacy & Security → Certificates → View Certificates → Import
+**4. Let the torrent client trust the CA (HTTPS trackers)**
+
+A CA trusted system-wide lets whoever gets its private key intercept every TLS connection of the machine, so the installer no longer does it by default. Two ways:
+
+- **Only the torrent client** (recommended): the installer writes `/var/lib/newgreedy/client-ca-bundle.pem` (system CAs + the NewGreedy CA). Start the client with
+  `SSL_CERT_FILE=/var/lib/newgreedy/client-ca-bundle.pem CURL_CA_BUNDLE=/var/lib/newgreedy/client-ca-bundle.pem qbittorrent`
+  (for a systemd unit: `Environment=SSL_CERT_FILE=...`). Re-run the installer after a `ca-certificates` update to refresh the bundle.
+- **The whole system**: `sudo ./install.sh --trust-ca` installs it as `/usr/local/share/ca-certificates/newgreedy-mitmproxy-ca.crt`. A CA trusted this way by an older version stays trusted on update.
 
 Keep the cloned folder: updates are run from it — see [Updating](#updating).
 
@@ -181,6 +195,7 @@ Keep the cloned folder: updates are run from it — see [Updating](#updating).
 ```bash
 sudo ./uninstall.sh
 ```
+Removes the service, the program, its data, the `newgreedy` account **and the NewGreedy CA from the system trust store** — only that certificate, compared byte for byte. `/root/.mitmproxy`, used by versions before v1.7.8 and by other mitmproxy tools, is left in place.
 
 **Service management:**
 ```bash
@@ -205,9 +220,10 @@ chmod +x install-macos.sh
 
 The installer:
 - Checks for `python3` (install with `brew install python@3.11` if missing)
-- Installs Python dependencies
+- Installs Python dependencies in `~/Library/Application Support/NewGreedy/venv`
 - Copies files to `~/Library/Application Support/NewGreedy`
-- Generates the mitmproxy CA and adds it to the login keychain
+- Generates the mitmproxy CA; `--trust-ca` adds it to the login keychain (every program of the account then trusts it)
+- Merges an existing `config.ini` instead of replacing it
 - Registers a launchd agent that starts at login
 
 **2. Verify**
@@ -227,6 +243,7 @@ Keep the cloned folder: updates are run from it — see [Updating](#updating).
 ```bash
 ./install-macos.sh --uninstall
 ```
+Removes the launchd agent and the NewGreedy CA from the login keychain — found by its SHA-1 fingerprint, so other mitmproxy certificates stay; data is kept.
 
 **Firefox** keeps its own certificate store — import manually:
 `~/.mitmproxy/mitmproxy-ca-cert.pem`
@@ -235,20 +252,20 @@ Keep the cloned folder: updates are run from it — see [Updating](#updating).
 
 ### Windows
 
-**1. Open PowerShell as Administrator**
+**1. Open PowerShell** (administrator rights are not needed)
 
 **2. Run the installer**
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\install.ps1
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -TrustCA
 ```
 
 The installer:
-- Checks for Python and downloads it automatically if missing (Python 3.11)
+- Checks for Python and downloads it if missing (Python 3.11) — the installer only runs when Windows confirms its Python Software Foundation signature
 - Installs Python dependencies
-- Copies files to `%LOCALAPPDATA%\NewGreedy\`
-- Imports the mitmproxy CA certificate into the Windows user certificate store
-- Registers a Scheduled Task that starts NewGreedy at logon
+- Copies files to `%LOCALAPPDATA%\NewGreedy\`; an existing `config.ini` is merged, not replaced
+- With `-TrustCA`, imports the mitmproxy CA into the user certificate store (HTTPS trackers need it)
+- Registers a Scheduled Task that starts NewGreedy at logon, without administrator rights
 
 **3. Verify**
 
@@ -265,39 +282,43 @@ Keep the folder you installed from: updates are run from it — see [Updating](#
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall
 ```
+Also removes the NewGreedy CA from the user certificate store — by its thumbprint, so other mitmproxy certificates stay.
 
 ---
 
 ### Docker
 
-**1. Create the required data files**
-
-```bash
-touch stats.json torrent_registry.json newgreedy.log
-echo '{}' > control.json
-```
-
-**2. Start the stack**
+**1. Start the stack**
 
 ```bash
 docker compose up -d
 ```
 
-**3. Check startup logs**
+The image `ghcr.io/mrt0t0/newgreedy` (amd64, arm64) is pulled; without network access to the registry, Compose builds it from the folder. Everything the container writes lives in `./data/` — `config.ini`, stats, registry, trash, backups, log. Nothing needs to be created beforehand.
+
+**2. Read the access token**
+
+The web UI listens on every interface inside the container, so a token is generated at the first start:
 
 ```bash
-docker compose logs -f
+docker compose logs newgreedy | grep -A2 "token was generated"
 ```
 
-**4. Export and trust the mitmproxy CA**
+Open the printed URL once; the browser keeps a cookie. The token is also in `./data/config.ini` (`web_secret_token`).
+
+**3. Export and trust the mitmproxy CA**
 
 ```bash
-docker exec newgreedy cat /root/.mitmproxy/mitmproxy-ca-cert.pem > mitmproxy-ca.crt
+docker exec newgreedy cat /home/newgreedy/.mitmproxy/mitmproxy-ca-cert.pem > mitmproxy-ca.crt
 ```
 
-Import `mitmproxy-ca.crt` into your OS or browser trust store, then restart your torrent client.
+Import `mitmproxy-ca.crt` into your OS or browser trust store, then restart your torrent client. The CA is created at the first start, in the `mitmproxy_ca` volume — never at build time.
 
-Updates are run from this folder — see [Updating](#updating).
+**4. Point the torrent client at the proxy**
+
+The proxy is published on `127.0.0.1:3456` of the host only. A client running in another container on the same Docker network uses `newgreedy:3456`.
+
+The container runs as the unprivileged user `newgreedy` (uid 1000). Updates: see [Updating](#updating).
 
 ---
 
@@ -307,6 +328,7 @@ Updates are run from this folder — see [Updating](#updating).
 git clone https://github.com/Mrt0t0/NewGreedy.git
 cd NewGreedy
 pip install -r requirements.txt
+python3 newgreedy.py --check-config   # optional self-check
 python3 newgreedy.py
 ```
 
@@ -316,17 +338,37 @@ Updates: see [Updating](#updating).
 
 ## Updating
 
-Every method keeps your data — `stats.json`, `torrent_registry.json`, `control.json`, `torrents/` — and **merges** `config.ini`: your values stay, and the settings a new version adds are inserted with their comments.
+Every method keeps your data — `stats.json`, `torrent_registry.json`, `control.json`, `trash.json`, `torrents/` — and **merges** `config.ini`: your values stay, the settings a new version adds are inserted with their comments, and retired settings are removed.
 
 | Install | Command-line update | Web button |
 |---|---|---|
 | Linux | `git pull`, then `sudo ./install.sh --update` | ✅ restarts on its own |
 | macOS | `git pull`, then `./install-macos.sh --update` | ✅ restarts on its own |
 | Windows | `git pull`, then `.\install.ps1 -Update` | ✅ start it again if it does not come back |
-| Docker | save `config.ini`, `git pull`, merge, rebuild | ⚠️ lasts until the container is rebuilt |
+| Docker | `docker compose pull && docker compose up -d` | ❌ disabled — the program lives in the image |
 | Manual | save `config.ini`, `git pull`, merge, restart | ✅ start NewGreedy again afterwards |
 
-**Coming from v1.7.6:** it has no update button — use the command line once. The button is available from v1.7.7 on.
+**Coming from v1.7.6:** it has no update button — use the command line once.
+
+### Coming from v1.7.7
+
+Four defaults change. Check them before restarting:
+
+| Setting | v1.7.7 | v1.7.8 | If you relied on the old behaviour |
+|---|---|---|---|
+| `[proxy] listen_host` | `0.0.0.0`, fixed | `127.0.0.1` | Torrent client on another machine: set `listen_host = 0.0.0.0` |
+| `[web] web_host` | `0.0.0.0` | `127.0.0.1` for new installs | Your value is kept by the merge; if it is not local, a token is generated and printed at the next start |
+| Linux service user | `root` | `newgreedy` | Nothing to do: `install.sh --update` moves the CA from `/root/.mitmproxy`, so the torrent client keeps trusting it |
+| mitmproxy CA | Trusted at install | Trusted only with `--trust-ca` / `-TrustCA` | Nothing to do on update: a CA already trusted stays trusted. On a new machine, pass the option or point the client at the bundle — see [Linux step 4](#linux) |
+
+- **Docker**: the files are now mounted as one folder. Before `docker compose up -d` with the new `docker-compose.yml`:
+  ```bash
+  docker compose down
+  mkdir -p data && mv config.ini stats.json torrent_registry.json control.json newgreedy.log data/ 2>/dev/null
+  mv torrents data/ 2>/dev/null
+  ```
+  The CA volume is reused as is. `config.ini` in `data/` is merged with the image's own at every start.
+- **One-click update from v1.7.7**: the v1.7.7 button still works for this step. Restart right after — until then the engine answers announces with a tracker error that says a restart is needed.
 
 ### Linux
 
@@ -363,22 +405,13 @@ Files in `%LOCALAPPDATA%\NewGreedy` are updated and the scheduled task is restar
 
 ### Docker
 
-`config.ini` is bind-mounted from the cloned folder, so it is also the file Git tracks: `git pull` refuses to run while it holds your settings. Set it aside, pull, merge it back, rebuild:
-
 ```bash
 cd ~/NewGreedy
-cp config.ini config.ini.mine
-git checkout -- .
-git pull
-python3 config_merge.py --shipped config.ini --current config.ini.mine --out config.ini
-[ -f control.json ] || echo '{}' > control.json
-docker compose up -d --build
+docker compose pull          # or: git pull && docker compose build
+docker compose up -d
 ```
 
-`git checkout -- .` discards changes to tracked files only — your settings are in `config.ini.mine`, and data files are not tracked. `control.json` is mounted since v1.7.7; if it is missing, Docker creates a directory in its place.
-
-Without `python3` on the host, run the merge in a throwaway container:
-`docker run --rm -v "$PWD:/w" -w /w python:3.11-slim python3 config_merge.py --shipped config.ini --current config.ini.mine --out config.ini`
+Your settings live in `./data/config.ini`, which Git does not track: `git pull` never conflicts with them. At start, the container merges it with the `config.ini` shipped in the image (a `pre-merge` backup is written first) and logs every change as `[CONFIG]`.
 
 ### Manual
 
@@ -396,14 +429,14 @@ python3 newgreedy.py
 
 ### Web interface
 
-When a newer release exists, the Help page shows **Update now**:
+When a newer release exists, the Help page shows its **release notes** and **Update now**:
 
-1. The release is downloaded from GitHub — the host is checked, and the SHA-256 too when the release notes publish one.
-2. Program files are copied to `.backup/`, then replaced.
-3. `config.ini` is merged; data files are not touched.
-4. **Restart to apply** stops NewGreedy so the new code loads.
+1. The release zip and its `.sha256` file are downloaded from GitHub. A release without the checksum file, or an archive that does not match it, is refused. The checksum sits in the same release, so it only catches a damaged download: when `UPDATE_SIGNING_KEY` is set in `_version.py`, the zip must also come with a valid Ed25519 signature (`<zip>.sig`). Create the key once with `python3 updater.py keygen <keyfile>`, then sign each zip with `python3 updater.py sign <zip> <keyfile>`.
+2. A `pre-update` backup of the data is written, then program files are copied to `.backup/` and replaced.
+3. `config.ini` is merged; data files are not touched. Changed dependencies are installed when NewGreedy runs in a venv; otherwise the status says to run `pip install -r requirements.txt`.
+4. **Restart to apply** stops NewGreedy so the new code loads. Until then, the engine refuses to run mixed versions and answers announces with a tracker error asking for the restart.
 
-Any failure puts the previous files back; `POST /api/update/rollback` does the same by hand.
+A failure while files are being replaced puts the previous ones back and deletes the new ones; a failed download changes nothing. `POST /api/update/rollback` restores by hand. `update_channel = beta` also offers pre-releases.
 
 What happens after **Restart to apply** depends on the install:
 
@@ -412,12 +445,13 @@ What happens after **Restart to apply** depends on the install:
 | Linux | systemd starts NewGreedy again | — |
 | macOS | launchd starts NewGreedy again | — |
 | Windows | NewGreedy stops | If it is not back within a minute: `Start-ScheduledTask -TaskName NewGreedy`, or log off and on |
-| Docker | the container restarts (`restart: unless-stopped`) | The new files live inside the container: rebuilding from an older clone brings the old version back. Update the clone as above before the next rebuild |
+| Docker | — | The button is disabled: pull the new image instead |
 | Manual | NewGreedy stops | Start it again with `python3 newgreedy.py`. The next `git pull` goes through the steps above |
 
 ### Options
 
-- `--keep-scrape` (`-KeepScrape` on Windows) — `intercept_scrape` is the only value a merge changes on its own, from `true` to `false` (the v1.7.7 default). This keeps yours.
+- `--keep-defaults` (`-KeepDefaults` on Windows) — never apply a new default over one of your values. A new default is only ever applied once, to a `config.ini` written by an older version. `--keep-scrape` is still accepted as an alias.
+- `--trust-ca` (Linux, macOS) / `-TrustCA` (Windows) — add the mitmproxy CA to the system trust store / login keychain / user store. Off by default; `--no-trust-ca` is still accepted and changes nothing.
 - `python3 config_merge.py --shipped config.ini --current <your config.ini>` without `--out` shows what would change and writes nothing.
 
 ---
@@ -438,7 +472,9 @@ Settings → Connection → Proxy Server:
 
 ### Deluge / Transmission / Other clients
 
-Set HTTP proxy `127.0.0.1:3456` in the network/proxy settings.
+Set HTTP proxy `127.0.0.1:3456` in the network/proxy settings. The **Status** page gives the exact steps for Deluge, Transmission (environment variables), rTorrent and a client running in Docker, and shows a green line as soon as an announce reaches NewGreedy — force a reannounce in the client to test.
+
+The proxy only accepts connections from this machine by default (`listen_host = 127.0.0.1`).
 
 ---
 
@@ -446,12 +482,17 @@ Set HTTP proxy `127.0.0.1:3456` in the network/proxy settings.
 
 | Platform | Config path |
 |---|---|
-| Linux / macOS | `/opt/newgreedy/config.ini` |
+| Linux | `/opt/newgreedy/config.ini` |
+| macOS | `~/Library/Application Support/NewGreedy/config.ini` |
 | Windows | `%LOCALAPPDATA%\NewGreedy\config.ini` |
-| Docker | `./config.ini` (bind-mounted) |
+| Docker | `./data/config.ini` |
 | Manual | `config.ini` next to `newgreedy.py` |
 
-Changes are applied live via **Reload config.ini** in the Config page, or `SIGHUP`. A full restart is only needed for `listen_port` and `web_port`.
+The data folder can be moved with the environment variable `NEWGREEDY_DATA_DIR`.
+
+The running engine reloads `config.ini` within 5 seconds of any change — web UI, hand edit or restore — and applies it to every torrent without touching the counters. A restart is only needed for `listen_host`, `listen_port`, `ssl_verify_trackers`, `[upstream]`, `[web]`, `port_range` and the client identity keys; the log line `[CONFIG] ... restart needed for ...` lists them.
+
+A value that cannot be read (`1,6` is read as `1.6`; `abc` is not) falls back to its default with a warning instead of stopping the engine. `python3 newgreedy.py --check-config` lists every problem.
 
 ---
 
@@ -459,8 +500,8 @@ Changes are applied live via **Reload config.ini** in the Config page, or `SIGHU
 
 | Key | Default | Description |
 |---|---|---|
+| `listen_host` | `127.0.0.1` | Address the proxy listens on. `0.0.0.0` only when the torrent client runs on another host or container — anyone who reaches the port can then use the proxy. Overridden by `NEWGREEDY_LISTEN_HOST`. |
 | `listen_port` | `3456` | Port NewGreedy listens on. Must match the proxy port in your torrent client. |
-| `tracker_timeout` | `5` | Reserved, not read. mitmproxy manages tracker connection timeouts itself. |
 
 ---
 
@@ -468,7 +509,6 @@ Changes are applied live via **Reload config.ini** in the Config page, or `SIGHU
 
 | Key | Default | Description |
 |---|---|---|
-| `upload_mode` | `ratio_based` | Engine mode. `ratio_based` is the only supported value. |
 | `target_ratio` | `1.60` | UL/DL ratio to reach per torrent. |
 | `target_ratio_buffer` | `0.03` | Internal overshoot buffer. Effective target = `target_ratio + buffer`. |
 | `auto_stop_at_target` | `true` | Stop injecting once the target ratio is reached. |
@@ -479,8 +519,7 @@ Changes are applied live via **Reload config.ini** in the Config page, or `SIGHU
 | `upload_noise_pct` | `3.0` | Pareto-distributed noise percentage on each upload increment. |
 | `stagnation_probability` | `0.03` | Per-announce probability of deliberately skipping injection. |
 | `seed_credit_mb` | `5.0` | MB credited per announce for pure seeders. |
-| `seed_target_mb` | `500.0` | Total upload target for pure seeders (progress bar reference). |
-| `seeding_dl_ratio` | `0.85` | Reserved, not read. |
+| `seed_target_mb` | `500.0` | Upload total that fills the progress bar of a pure seeder in the web UI. |
 | `anti_clustering` | `true` | Legacy master switch for announce de-correlation. Superseded by `desync_announces`, which falls back to this value. |
 
 ---
@@ -494,14 +533,12 @@ Changes are applied live via **Reload config.ini** in the Config page, or `SIGHU
 | `spoof_user_agent` | `true` | Send the emulated client's User-Agent. `false` leaves your own client's header untouched. |
 | `spoof_peer_id` | `true` | Use one stable `peer_id` and `key` for the whole session, like a real client. |
 | `spoof_peers` | `true` | Send the `numwant` value of the emulated client instead of the real one. |
-| `peer_variance` | `0.15` | Reserved, not read. |
 | `spoof_port` | `true` | Use one stable listening port for the whole session, taken from `port_range`. |
 | `port_range` | `6881-6999` | Range for spoofed port selection. |
 | `spoof_headers` | `true` | Inject realistic `Accept` and `Accept-Language` headers. |
-| `intercept_scrape` | `false` | Silently drop scrape requests. A client that never scrapes is atypical. |
 | `echo_trackerid` | `true` | Send back the `trackerid` a tracker hands out, as BEP 3 requires. |
-| `tracker_whitelist` | _(empty)_ | Comma-separated domains to process. Empty = all. |
-| `tracker_blacklist` | _(empty)_ | Comma-separated domains to skip. Takes precedence over whitelist. |
+| `tracker_whitelist` | _(empty)_ | Comma-separated domains to process; a domain also covers its subdomains, never a longer name (`tracker.org` does not match `tracker.org.evil.net`). Empty = all. |
+| `tracker_blacklist` | _(empty)_ | Comma-separated domains to skip, same matching. Takes precedence over whitelist. |
 | `desync_announces` | `true` | Give every torrent its own announce period so torrents sharing a tracker never stay in lockstep. |
 | `desync_spread_pct` | `0.18` | Maximum extra delay added to the tracker interval, as a fraction. Hard limit `0.45`. |
 | `desync_min_gap` | `45` | Two announces to the same tracker closer than this count as a cluster and widen the spread. |
@@ -519,7 +556,7 @@ make your client announce more often than the tracker allows. A `min interval` l
 
 | Key | Default | Description |
 |---|---|---|
-| `ssl_verify_trackers` | `true` | Reserved, not read. Certificate handling follows mitmproxy's own settings. |
+| `ssl_verify_trackers` | `true` | Check the certificate of HTTPS trackers. `false` accepts expired or self-signed ones (restart required). |
 
 ---
 
@@ -530,7 +567,11 @@ make your client announce more often than the tracker allows. A `min interval` l
 | `persist_stats` | `true` | Save stats to `stats.json`. Flushed at most once per 60 s; forced on stop. |
 | `auto_purge_stopped` | `true` | Remove torrent from stats on `event=stopped`. |
 | `stopped_purge_delay` | `120` | Seconds before a torrent that sent `event=stopped` is dropped. A client that comes back in time keeps its counters. `0` = immediate. |
+| `inactive_purge_hours` | `12` | Hours without any announce before a torrent is moved to the trash. Never checked during the first hour after a start, so torrents can announce first. `0` = never. |
 | `tracker_cumul_ttl_days` | `30` | Days before an inactive tracker domain is dropped from the cumulative ratio. |
+| `history_max_points` | `200` | History points kept per torrent for the charts. |
+| `history_retention_days` | `0` | Days of history kept per torrent. `0` = limited by `history_max_points` only. |
+| `trash_retention_days` | `7` | Days a purged torrent stays in the trash and can be restored. `0` = no trash, purges are final. |
 
 ---
 
@@ -539,14 +580,14 @@ make your client announce more often than the tracker allows. A `min interval` l
 | Key | Default | Description |
 |---|---|---|
 | `web_enabled` | `true` | Enable the FastAPI web UI and REST API. |
-| `web_host` | `0.0.0.0` | Bind address for the web server. Use `127.0.0.1` to restrict to localhost. |
+| `web_host` | `127.0.0.1` | Bind address for the web server. Any other address requires a token. Overridden by `NEWGREEDY_WEB_HOST`. |
 | `web_port` | `8080` | Port for the web UI. |
-| `web_secret_token` | _(empty)_ | Token required to reach the UI/API. Pass it once as `?token=...`; it is then stored in a cookie. Empty disables authentication. |
-| `web_path_prefix` | _(empty)_ | Serves the whole UI under `/<prefix>/`, hiding it from casual scans. Alphanumeric only. |
-| `web_rate_limit` | `240` | Max requests per minute per client IP. `0` disables the limit. |
+| `web_secret_token` | _(empty)_ | Token required to reach the UI/API. Generated at start — and printed on the console, never in the log file — when `web_host` is not local and this is empty. Sign in on the page shown, or open `?token=...` once: the token goes into an HttpOnly cookie and is removed from the URL. Scripts send it as the `X-Auth-Token` header. Rotate it from the Config page. |
+| `web_path_prefix` | _(empty)_ | Serves the whole UI under `/<prefix>/`, WebSocket included, hiding it from casual scans. Letters, digits, `-` and `_`. |
+| `web_rate_limit` | `240` | Max requests per minute per client IP. `0` disables the limit. Sign-in attempts are limited to 10 per minute. |
+| `web_allowed_origins` | _(empty)_ | Extra origins allowed to send changes when a reverse proxy rewrites the `Host` header, e.g. `https://ng.example.org`. Without a token, the UI only answers to `localhost`, `127.x.x.x`, `[::1]` and the host names listed here (HTTP 421 otherwise), which blocks DNS-rebinding pages. |
 
-> **Exposing the UI beyond localhost?** Set both `web_path_prefix` and `web_secret_token`.
-> With defaults, anyone who can reach the port can read stats and purge data.
+> Every request that changes something must come from the web UI's own origin: another site open in the same browser cannot drive the API (CSRF), even without a token.
 
 ---
 
@@ -559,13 +600,10 @@ make your client announce more often than the tracker allows. A `min interval` l
 | `interval_jitter_pct` | `0.08` | ±Jitter on announce interval as a fraction. |
 | `stall_announce_threshold` | `8` | Consecutive zero-DL announces before `[STALL_NET]` is flagged. |
 | `min_announces_before_stagnation` | `10` | Minimum announces before stagnation can trigger. |
-| `log_level` | `INFO` | Verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR`. |
-| `event_anomaly_probability` | `0.03` | Reserved, not read. A fake `event=started` contradicts a growing upload counter. |
+| `log_level` | `INFO` | Verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR`. Applied live. |
 | `corrupt_field_probability` | `0.05` | Probability of adding a `corrupt=` field. |
 | `respect_tracker_interval` | `true` | Pace announces using the `interval` returned by the tracker when available. |
-| `multi_tracker_delay_min` | `0.5` | Reserved, not read. |
-| `multi_tracker_delay_max` | `8.0` | Reserved, not read. |
-| `watch_folder` | `torrents` | Folder scanned every 15 s for new `.torrent` files. Empty disables auto-import. |
+| `watch_folder` | `torrents` | Folder scanned every 15 s for new `.torrent` files, relative to the data folder. Empty disables auto-import. |
 
 ---
 
@@ -596,9 +634,12 @@ make your client announce more often than the tracker allows. A `min interval` l
 
 | Key | Default | Description |
 |---|---|---|
-| `webhook_url` | _(empty)_ | Destination URL. Empty disables notifications. |
-| `webhook_format` | `generic` | `generic` (plain JSON), `discord` or `slack`. |
-| `webhook_events` | `target_reached,tracker_down,global_cap` | Subscribed events among `target_reached`, `tracker_down`, `tracker_up`, `global_cap`, `purged`. Identical alerts are de-duplicated within a 5-minute window. |
+| `webhook_url` | _(empty)_ | Destination URL (`http://` or `https://`). Empty disables notifications. |
+| `webhook_format` | `generic` | `generic` (plain JSON), `discord`, `slack`, `ntfy` (`https://ntfy.sh/<topic>`), `gotify` (`https://<server>/message?token=<app token>`) or `telegram` (`https://api.telegram.org/bot<token>/sendMessage`). |
+| `webhook_events` | `target_reached,tracker_down,global_cap,engine_failed` | Subscribed events among `target_reached`, `tracker_down`, `tracker_up`, `global_cap`, `purged`, `engine_failed`. Identical alerts are de-duplicated within a 5-minute window. |
+| `webhook_chat_id` | _(empty)_ | Telegram only: the chat that receives the messages. |
+
+**Send a test notification** on the Config page checks the settings at once. `tracker_down` now also fires on timeouts, DNS failures and refused connections, not only on 5xx answers.
 
 ---
 
@@ -608,6 +649,32 @@ make your client announce more often than the tracker allows. A `min interval` l
 |---|---|---|
 | `proxy_url` | _(empty)_ | Forward tracker announces through an external proxy, e.g. `http://gluetun:8888`. |
 | `proxy_bypass` | _(empty)_ | Comma-separated domains that must not go through the upstream proxy. |
+
+---
+
+### [backup]
+
+| Key | Default | Description |
+|---|---|---|
+| `auto_backup` | `true` | Write a backup archive of the data files on a schedule, into `backups/` in the data folder. |
+| `backup_interval_hours` | `24` | Hours between two automatic backups. |
+| `backup_keep` | `7` | Automatic backups kept; the oldest are deleted. The last 5 manual, `pre-update`, `pre-restore` and `pre-merge` archives are kept as well. |
+
+---
+
+### [update]
+
+| Key | Default | Description |
+|---|---|---|
+| `update_channel` | `stable` | `stable`: releases only. `beta`: pre-releases too. |
+
+---
+
+### [meta]
+
+| Key | Default | Description |
+|---|---|---|
+| `config_version` | `v1.7.8` | Version that wrote the file. Managed by the installers and the updater — do not edit. |
 
 ---
 
@@ -633,7 +700,7 @@ catch_up_factor              = 0.10
 target_ratio                 = 2.50
 ```
 
-Useful when a private tracker requires a modest ratio while another tolerates more.
+Useful when a private tracker requires a modest ratio while another tolerates more. The overrides apply to torrents reloaded from `stats.json` at start too, and the per-tracker cap is the one shown in the web UI. Keys from `[spoofing]`, `[advanced]` and `[bandwidth]` can be overridden; anything else is ignored with a warning.
 
 ---
 
@@ -642,11 +709,14 @@ Useful when a private tracker requires a modest ratio while another tolerates mo
 | Page | URL | Description |
 |---|---|---|
 | Dashboard | `/` | Summary cards, tracker cap warning banner, auto-refresh every 15 s |
-| Torrents | `/torrents` | Sortable, searchable table with per-torrent pause, ratio override and tags |
+| Torrents | `/torrents` | Sortable, searchable table with per-torrent pause, ratio override, tags and removal; trash with restore |
 | Charts | `/charts` | Time-series per torrent, plus a compare mode overlaying several ratio curves |
-| Config | `/config` | View and edit settings, client profiles, backup/restore, `.torrent` import |
+| Config | `/config` | View and edit settings, access token, notification test, client profiles, backups, `.torrent` import |
 | Logs | `/logs` | Live log stream, level filters, tracker ratio bar, GLOBAL_CAP counter |
-| Help | `/help` | Log reference, API docs, qBittorrent setup, one-click update |
+| Status | `/status` | Self-check, engine state, file sizes, client setup guide, live "announce received" test, per-tracker state |
+| Help | `/help` | Log reference, API docs, qBittorrent setup, release notes and one-click update |
+
+When a token is set, pages without a valid session show a sign-in page.
 
 ---
 
@@ -657,8 +727,11 @@ Useful when a private tracker requires a modest ratio while another tolerates mo
 | `/api/stats` | GET | All torrent stats |
 | `/api/stats/csv` | GET | Export stats as CSV |
 | `/api/stats/purge` | GET | Dry-run preview — count and hashes that would be purged |
-| `/api/stats/purge` | DELETE | Purge torrents — params: `keep_active`, `inactive_hours` |
-| `/api/stats/{ih}` | DELETE | Delete a single torrent by 8-char hash prefix |
+| `/api/stats/purge` | DELETE | Move torrents to the trash — params: `keep_active`, `inactive_hours` |
+| `/api/stats/{ih}` | DELETE | Move a single torrent to the trash, by 8-char hash prefix |
+| `/api/trash` | GET / DELETE | Purged torrents still restorable / empty the trash |
+| `/api/trash/{ih}/restore` | POST | Bring a purged torrent back |
+| `/api/trash/{ih}` | DELETE | Delete one trash entry for good |
 | `/api/tracker_stats` | GET | Per-domain UL/DL cumul, ratio, and % of cap |
 | `/api/udp_status` | GET | UDP trackers detected — these bypass NewGreedy |
 | `/api/registry` | GET | Imported torrents: name, size, tracker list |
@@ -669,22 +742,34 @@ Useful when a private tracker requires a modest ratio while another tolerates mo
 | `/api/control/override` | POST | Force a target ratio or an upload total |
 | `/api/control/tags` | POST | Assign tags to a torrent |
 | `/api/profiles` | GET | Available emulated client profiles |
-| `/api/backup` | GET | Download a zip with config, stats, registry and control file |
-| `/api/restore` | POST | Restore a backup archive |
+| `/api/backup` | GET | Download a zip with config, stats, registry, control file and trash |
+| `/api/restore` | POST | Restore an uploaded backup archive (a `pre-restore` backup is written first) |
+| `/api/backups` | GET / POST | List stored backups / create one now |
+| `/api/backups/{name}` | GET / DELETE | Download / delete a stored backup |
+| `/api/backups/{name}/restore` | POST | Restore a stored backup |
+| `/api/status` | GET | Self-check, engine state, last announce, per-tracker state, file sizes |
+| `/api/notify/test` | POST | Send a test notification |
+| `/api/token` | GET | Whether a token is required |
+| `/api/token/rotate` | POST | Generate a new token (returned once) |
+| `/api/token/clear` | POST | Remove the token — only when `web_host` is local |
+| `/api/login` · `/api/logout` | POST | Open / close a browser session (HttpOnly cookie) |
+| `/api/update/release` | GET | Release notes of the latest version on the configured channel |
 | `/api/update/status` | GET | Current version, update progress, pending restart |
 | `/api/update/start` | POST | Download the latest release and replace program files |
 | `/api/update/rollback` | POST | Restore the files saved before the last update |
 | `/api/restart` | POST | Restart the service so new files take effect |
 | `/metrics` | GET | Prometheus metrics |
 | `/api/logs` | DELETE | Truncate `newgreedy.log` on the server |
-| `/api/health` | GET | Stalled, anomalous, and target-reached torrents |
+| `/api/health` | GET | Engine state, always reachable (Docker healthcheck); stalled, anomalous and target-reached torrents when authenticated. `503` when the engine failed or stopped answering |
 | `/api/history` | GET | Time-series snapshots for all torrents |
 | `/api/history/{ih}` | GET | Time-series for one torrent |
 | `/api/config` | GET | Current `config.ini` as JSON |
-| `/api/config/reload` | POST | Reload `config.ini` without restarting |
+| `/api/config/reload` | POST | Reload `config.ini` without restarting (the engine also does it on its own) |
 | `/api/version` | GET | Current version vs latest GitHub release |
 | `/api/upload` | POST | Upload a `.torrent` to pre-register infohash + size |
 | `/ws/logs` | WebSocket | Real-time log stream |
+
+Requests that change something must come from the web UI's origin (or carry no browser `Origin` at all, like `curl`). With a token, send it as `X-Auth-Token`.
 
 **Purge parameters:**
 
@@ -730,9 +815,9 @@ GET    /api/tracker_stats                                     # per-domain ratio
 | `[STALL_ALGO]` | Engine stagnation active |
 | `[TARGET_REACHED]` | Target ratio achieved — injection stopped |
 | `[PURGED]` | Removed after `event=stopped` or manual purge |
-| `[AUTO-PURGE]` | Removed automatically after 12 h of no announce |
+| `[AUTO-PURGE]` | No announce for `inactive_purge_hours` — moved to the trash (never during the first hour after a start) |
 | `[GLOBAL_CAP]` | Global tracker ratio guard triggered — UL reduced |
-| `[TRACKER_DOWN]` | Tracker entering exponential backoff after repeated 5xx errors |
+| `[TRACKER_DOWN]` | Tracker entering exponential backoff after repeated 5xx errors, timeouts or connection failures |
 | `[TRACKER_UP]` | Tracker recovered — announces resume |
 | `[UDP_BYPASS]` | UDP tracker detected — its announces are **not** intercepted |
 | `[WATCH]` | Torrent auto-imported from the watch folder |
@@ -749,6 +834,14 @@ GET    /api/tracker_stats                                     # per-domain ratio
 | `[RESUMED]` | It announced again before that delay — the purge was cancelled and the counters kept |
 | `[DL_CAP]` | The reported download was held back to keep `left` falling at a plausible speed |
 | `[TRACKERID]` | A tracker issued a `trackerid`; it is echoed from the next announce on (debug level) |
+| `[TARGET_REACHED] hash@tracker` | The torrent just reached its target — logged and notified once, when it happens |
+| `[CONFIG]` | `config.ini` reloaded live, or merged after an upgrade; lists settings that still need a restart |
+| `[REGISTRY]` | `torrent_registry.json` reloaded — sizes corrected when they changed |
+| `[TRASH]` | Trash entries older than `trash_retention_days` deleted for good |
+| `[RESTORE]` | Stats replaced from a backup, or torrents brought back from the trash |
+| `[BACKUP]` | Backup archive written (`auto`, `manual`, `pre-update`, `pre-restore`, `pre-merge`) |
+| `[TOKEN]` | Web UI token rotated or removed |
+| `[ENGINE_FAILED]` | The engine could not start: announces get a tracker error that names the problem until it is fixed and NewGreedy restarted |
 
 ---
 
@@ -763,21 +856,28 @@ GET    /api/tracker_stats                                     # per-domain ratio
 | Ratio on tracker exceeds `max_global_ratio` | Pre-v1.7.5: cap was computed after accumulation | Upgrade to v1.7.5 — fixed by correct ordering |
 | Ratio cap resets after restart | Pre-v1.7.5: `_tracker_cumul` not persisted | Upgrade to v1.7.5 — now saved in `stats.json` |
 | `[STAG][STALL_ALGO][TARGET_REACHED]` together | Pre-v1.7.5: stagnation ran after target check | Upgrade to v1.7.5 — `_calc_upload` short-circuits on target |
-| `[TRACKER_DOWN]` in logs, announces skipped | Tracker returning 5xx — backoff active | Wait for automatic recovery; check tracker status |
+| `[TRACKER_DOWN]` in logs, announces skipped | Tracker returning 5xx, timing out or unreachable — backoff active | Wait for automatic recovery; the Status page shows the last answer per tracker |
+| Client shows *NewGreedy engine not running* as tracker error | The engine failed to start, or an update is waiting for a restart | Read the reason in the message or on the Status page; `--check-config`; restart NewGreedy |
+| Torrent client cannot reach the proxy after upgrading | `listen_host` is now `127.0.0.1` | Set `listen_host = 0.0.0.0` when the client runs on another host |
+| Sign-in page appears after upgrading | `web_host` is not local: a token was generated | Read it on the console / `journalctl -u newgreedy` / `docker compose logs`, or in `config.ini` |
+| One-click update refused: *no checksum file* | The release has no `.sha256` asset | Update from the command line |
+| `Stats save failed` in Docker | v1.7.7 compose file: files mounted one by one | Switch to the `./data` folder layout — see [Coming from v1.7.7](#coming-from-v177) |
 | Purge by inactivity does nothing | Entries have no timestamp | Use `GET /api/stats/purge?inactive_hours=12` to preview first |
-| `mitmproxy crashed (password cannot be longer than 72 bytes)` | bcrypt 5.x is incompatible with the passlib version mitmproxy depends on | `pip install --break-system-packages "bcrypt<5"` — pinned in `requirements.txt` since v1.7.6 |
-| `AttributeError: module 'bcrypt' has no attribute '__about__'` | Same bcrypt 5.x incompatibility (warning only, but precedes the crash) | Same fix as above |
+| `mitmproxy crashed (password cannot be longer than 72 bytes)` | mitmproxy 10 or 11 with bcrypt 5.x: the passlib they use cannot handle it | `pip uninstall bcrypt`, or move to mitmproxy 12 (Python 3.12+); `--check-config` flags it |
+| `AttributeError: module 'bcrypt' has no attribute '__about__'` | mitmproxy 10 or 11: bcrypt ≥ 4.1 next to passlib (harmless warning) | `pip uninstall bcrypt` |
 | Service restarts in a loop after upgrade | The old systemd unit was not regenerated | `systemctl stop newgreedy && rm /etc/systemd/system/newgreedy.service && systemctl daemon-reload`, then run `install.sh` **without** `--update` |
 | Ratio not rising on a tracker | The tracker is UDP — announces bypass the proxy | Check the dashboard banner / `GET /api/udp_status`. UDP interception is not supported |
 | Identity changes after restart | Pre-v1.7.6: `peer_id`/`port` were not persisted | Upgrade to v1.7.6 — identity is now stored in `stats.json` |
-| Web UI reachable by anyone | Default bind is `0.0.0.0` with no auth | Set `web_secret_token` and `web_path_prefix`, or bind to `127.0.0.1` |
+| Web UI reachable by anyone | v1.7.7 and older: default bind `0.0.0.0` with no auth | v1.7.8 binds to `127.0.0.1`, and generates a token for any other address |
 | Stats lost after `docker stop` | Pre-v1.7.6: no SIGTERM handler | Upgrade to v1.7.6 — a final flush runs on shutdown |
 | `.torrent` in watch folder ignored | Folder disabled or file too large | Check `watch_folder` and the 10 MB limit; see `[WATCH]` lines in the log |
 | Ratio not increasing | 0 leechers (swarm-aware block) | Wait for leechers; check Charts for history |
 | `[STALL_NET]` on all torrents | Client reports 0 download consistently | Normal for pure seeders — lower `stall_announce_threshold` |
-| HTTPS announces not intercepted | mitmproxy CA not trusted | Re-run installer or import CA manually |
+| HTTPS announces not intercepted | mitmproxy CA not trusted by the torrent client | Start the client with `SSL_CERT_FILE` (Linux), or re-run the installer with `--trust-ca` / `-TrustCA` |
+| Web UI answers `421 unexpected Host header` | Reached by a name other than localhost, without a token | Set `web_secret_token`, or add the name to `web_allowed_origins` |
 | Web UI not loading | Missing dependencies | `pip install fastapi uvicorn python-multipart` |
-| Config changes not applied | Service not reloaded | Click **Reload config.ini** or `systemctl restart newgreedy` |
+| Config changes not applied | The setting needs a restart, or the value is invalid | Check the `[CONFIG]` line in the log and `--check-config`; `systemctl restart newgreedy` |
+| A torrent disappeared | Purged after `event=stopped`, inactivity or by hand | Torrents page → Trash → Restore, within `trash_retention_days` |
 
 ---
 
@@ -789,16 +889,27 @@ GET    /api/tracker_stats                                     # per-domain ratio
 | `_version.py` | Shared constants: version check, bencode reader, webhook delivery |
 | `client_profiles.py` | Emulated client definitions — peer_id, headers, parameter order |
 | `updater.py` | Downloads a GitHub release, swaps program files, keeps a rollback copy |
-| `config_merge.py` | Brings an existing `config.ini` up to the shipped one without losing a setting; used by every installer and by the one-click update |
+| `config_merge.py` | Brings an existing `config.ini` up to the shipped one without losing a setting; used by every installer, the one-click update and the Docker start |
+| `config_schema.py` | Every setting with its type, range and default: tolerant reading, validation, safe edits |
+| `datastore.py` | Data folder paths and the files shared by the engine and the web UI (locks, trash, purge and restore queues, engine status) |
+| `backups.py` | Rotating backup archives |
+| `diagnostics.py` | Self-check behind `--check-config` and the Status page |
 | `control.json` | Paused torrents, ratio overrides and tags — written by the web UI |
-| `newgreedy_addon.py` | mitmproxy addon — intercepts announces, ratio engine, stats, backoff |
+| `trash.json` | Purged torrents, restorable for `trash_retention_days` |
+| `backups/` | Backup archives (`auto`, `manual`, `pre-update`, `pre-restore`, `pre-merge`) |
+| `.addon_status.json` | Engine heartbeat read by the Status page and `/api/health` |
+| `newgreedy_addon.py` | mitmproxy addon — intercepts announces and rewrites them, tracker backoff |
+| `engine_model.py` | Per-torrent ratio model and session identity |
+| `engine_state.py` | Engine state: purges, control file, registry, `stats.json` persistence |
 | `newgreedy_web.py` | FastAPI app — web UI and REST API |
 | `config.ini` | Main configuration file |
 | `stats.json` | Persisted stats (schema v7) — includes `_tracker_cumul`, the session identity, reported progress and stored tracker ids |
 | `torrent_registry.json` | Infohash, size, name and tracker list from `.torrent` imports |
 | `torrents/` | Watch folder — drop `.torrent` files here for auto-import |
 | `newgreedy.log` | Log file (streamed live in Logs page) |
-| `static/` | Web UI assets |
+| `static/` | Web UI assets — Chart.js 4.6.1 is shipped in it (`chart.umd.min.js`, MIT), no script is loaded from a CDN |
+| `MANIFEST.txt` | Program files the installers copy — the one list to update when a file is added |
+| `tests/` | Test suite — `python3 -m unittest discover -s tests -t .` (web and engine tests need `httpx` and `mitmproxy`) |
 | `install.sh` | Installer — Linux / macOS |
 | `install.ps1` | Installer — Windows |
 | `install-macos.sh` | Installer — macOS (launchd) |
@@ -806,8 +917,10 @@ GET    /api/tracker_stats                                     # per-domain ratio
 | `requirements.txt` | Python dependencies |
 | `LICENSE` | GNU General Public License v3.0 |
 | `.gitignore` | Excludes runtime data (`stats.json`, logs, `.torrent` files) from Git |
-| `Dockerfile` | Docker image |
-| `docker-compose.yml` | Docker Compose stack |
+| `Dockerfile` | Docker image — unprivileged user, no CA baked in |
+| `docker-entrypoint.sh` | Fixes volume ownership, then drops root |
+| `docker-compose.yml` | Docker Compose stack — one `./data` folder |
+| `.github/workflows/` | Release zip + `.sha256`, multi-arch image on GHCR |
 
 ---
 
@@ -839,6 +952,46 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 ## Changelog
 
+### v1.7.8
+
+| | v1.7.7 | v1.7.8 |
+|---|---|---|
+| Proxy bind | `0.0.0.0`, hard-coded | `listen_host`, `127.0.0.1` by default |
+| Web UI access | `0.0.0.0`, no token, no CSRF check | `127.0.0.1`; token generated for any other address; sign-in page, HttpOnly cookie, origin check on every change and on the WebSocket; without a token, only loopback host names are answered (DNS rebinding) |
+| Secrets in `/api/config` | Token masked | Token, webhook path and proxy password masked |
+| Chart.js | Loaded from a CDN, floating `@4` | 4.6.1 shipped in `static/`; the CSP allows no third-party script |
+| Web UI data | File names, tags and tracker domains inserted as HTML | Escaped everywhere |
+| Torrent size | Multi-file torrents: size of the first file only | Real total |
+| Invalid setting | Engine did not load, announces passed through unmodified | Default used with a warning; an engine that cannot start answers announces with an explicit tracker error |
+| Stop / restart | mitmproxy relaunched on SIGTERM, exit code 1 | Clean stop in under a second |
+| Failed update download | Restored the backup of the *previous* update, old `config.ini` included | Nothing touched; `.sha256` required, optional Ed25519 signature; every path checked to stay in the program folder; `pre-update` backup |
+| Inactive purge | Fixed 12 h, run at the first announce after a start | `inactive_purge_hours`, never in the first hour, to the trash |
+| Deleting torrents | Final | Trash, restorable for `trash_retention_days` |
+| Settings | Read at start only | Reloaded live within 5 s |
+| `[tracker:x]` / ratio override | Lost after a restart / removal ignored | Kept / applied at once |
+| Registry | Read at start only | Reloaded when it changes |
+| Backups | Manual download | Automatic rotation, one-click restore, backups before update and restore |
+| Notifications | Discord, Slack, JSON; 5xx only; target reached late | + ntfy, Gotify, Telegram, test button; timeouts count; target reached notified at once |
+| Status | — | Status page and `--check-config` |
+| Docker | Root, files mounted one by one, update button | Unprivileged user, one `./data` folder, image on GHCR, update by `docker compose pull` |
+| Linux service | root, system pip | `newgreedy` account, venv |
+| mitmproxy CA | Trusted system-wide / in the keychain / in the user store at install | Only with `--trust-ca` / `-TrustCA`; Linux bundle for the torrent client alone; uninstall removes this CA only |
+| Installers | Re-running without `--update` replaced `config.ini`; Windows task with administrator rights, JSON files rewritten with a BOM on update | `config.ini` always merged; data files never touched; Windows task as a normal user, Python installer signature checked |
+| Torrent keys | First 8 hex digits of the info-hash: two torrents could share an entry | Full info-hash; 8-digit entries adopted on the next announce |
+| `config.ini` | 12 sections, 73 keys, 8 unused | 15 sections, 77 keys, none unused |
+| Python files | 7 | 13 — `config_schema.py`, `datastore.py`, `backups.py`, `diagnostics.py`, `engine_model.py`, `engine_state.py` added |
+| Several trackers per torrent | Each tracker's announce credited a full interval: 3 trackers, 3× the configured speed | Upload credited on the torrent's own clock, whatever the number of trackers |
+| `global_max_speed_mbps` | Checked over the last minute only: the real shared ceiling was about 1/30 of the setting | Checked over the announce interval |
+| `max_global_ratio_per_tracker` | Raised the upload it was meant to cut | Caps the increment, the per-tracker total matches what was announced |
+| Tracker in backoff | Announces passed through unmodified (real peer_id, lower upload) | Still rewritten |
+| First announce of a new torrent | Up to one full interval of upload with `event=started` | `uploaded=0` |
+| Resumed / completed torrent | Resumed at 70 %: reported at 0 %; completed: `left` > 0 | Reported where the client is; `left=0` once complete |
+| mitmproxy | 10 and 11 | 10 to 12 (Python 3.14 supported through mitmproxy 12) |
+| Tests | — | `tests/`, 63 tests |
+
+- **Fixes** — `inf` or `1e400` in `config.ini` no longer crash the start; a torrent removed in the web UI can no longer come back at the next save; busy ports are detected on Windows; Logs page counters no longer slow down with the log size; whitelist/blacklist no longer match longer domain names; `config.ini` edits are atomic; purge requests can no longer be lost; torrent Actions column restored (pause, ratio, tags, delete); links keep the path prefix; `log_level`, `seed_target_mb` and `ssl_verify_trackers` now read; installers generate the CA again (the call failed silently since mitmproxy 10); `/metrics` labels escaped; stats saved off the proxy loop; restoring from the trash a torrent that came back no longer loses the trashed figures; the Status page reports an engine blocked by an unfinished update; an invalid `web_secret_token` locks the web UI instead of opening it; the bcrypt check no longer flags mitmproxy 12
+- **Upgrading** — read [Coming from v1.7.7](#coming-from-v177): `listen_host` defaults to `127.0.0.1`, Docker moves to a `./data` folder, the Linux service runs as `newgreedy`; 8 unused settings, `intercept_scrape` included, are removed from `config.ini` by the installers' and Docker's merge (the v1.7.7 update button keeps them; they are ignored and listed on the Status page); HTTPS trackers need the torrent client to trust the CA — see [Linux step 4](#linux)
+
 ### v1.7.7
 
 | | v1.7.6 | v1.7.7 |
@@ -861,6 +1014,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 | `config.ini` | 7 sections, 50 keys | 12 sections, 73 keys |
 | Python files | 4 | 7 — `client_profiles.py`, `updater.py`, `config_merge.py` added |
 
+- **Fixes** — a `%` in a setting no longer stops the engine; the Real UL column no longer climbs on its own; a stopped torrent can no longer come back as an empty entry; installers copy a file list instead of the whole folder, `.git/` included
 - **Upgrading** — per-tracker totals written by v1.7.6 are discarded once (`[CUMUL_RESET]`), and `intercept_scrape` moves to `false`; everything else in `config.ini` is kept
 
 ### v1.7.6
@@ -908,6 +1062,43 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 ---
 
 ## Detailed changelog
+
+### v1.7.8
+
+**Security**
+- Proxy bound to `127.0.0.1` by default (`listen_host`); web UI too (`web_host`), with a token generated at start whenever it listens beyond this machine
+- Stored XSS closed: every file name, tag, tracker domain and error message is escaped before display
+- Origin check on every change and on the log WebSocket (CSRF); sign-in page; token kept in an HttpOnly cookie, removed from URLs, compared in constant time; rotation from the Config page
+- Without a token, the web UI answers only to loopback host names and `web_allowed_origins` (DNS rebinding)
+- `/api/config` masks the webhook path and the upstream proxy password
+- Chart.js shipped in `static/`; no script loaded from a CDN
+- One-click update needs the release zip and its `.sha256`, and an Ed25519 signature once `UPDATE_SIGNING_KEY` is set; archive paths confined to the program folder; `pre-update` backup; disabled in Docker
+- Linux service under a dedicated `newgreedy` account, in a venv; CA key readable by that account only
+- mitmproxy CA trusted only on request (`--trust-ca`, `-TrustCA`); uninstallers remove this CA only, by content or fingerprint
+- Windows: scheduled task without administrator rights; Python installer run only with a valid PSF signature
+- Docker image runs unprivileged and never contains a CA; proxy published on `127.0.0.1` of the host
+
+**Reliability**
+- Clean stop on SIGTERM/SIGINT: the watchdog restarts mitmproxy on failures only
+- Tolerant settings: an unreadable value falls back to its default with a warning; an engine that cannot start answers announces with a tracker error that names the problem, and never runs mixed versions after an update
+- Multi-file torrents registered with their real size; registry reloaded live and sizes corrected
+- Stats written off the proxy loop; shared state behind one lock; purge and restore queues locked across threads
+- A failed update download no longer rolls back to an older version; a failed apply removes the files it created
+- Inactive purge configurable and never run right after a start
+- Docker: one data folder, so atomic writes work; healthcheck reachable with a token or a path prefix
+- Torrents keyed by their full info-hash; entries of older versions adopted on the next announce
+- `stats.json` written under the file lock, pending purges applied first
+- Installers merge an existing `config.ini` every time and never touch data files
+- Engine split into `engine_model.py` and `engine_state.py`; one file list (`MANIFEST.txt`); version read from `_version.py`; test suite in `tests/`
+
+**Features**
+- Status page and `python3 newgreedy.py --check-config`
+- Trash for purged torrents; automatic rotating backups with one-click restore
+- `config.ini` reloaded live; per-tracker overrides kept across restarts; ratio override removal applied at once
+- Notifications to ntfy, Gotify and Telegram, `engine_failed` event, test button; `tracker_down` on timeouts and connection errors; `target_reached` notified when it happens
+- Release notes shown before updating; `stable` / `beta` channel
+- Adjustable chart history (`history_max_points`, `history_retention_days`)
+- Multi-arch image `ghcr.io/mrt0t0/newgreedy`; release workflow building the zip and its checksum
 
 ### v1.7.6
 

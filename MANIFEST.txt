@@ -1,0 +1,27 @@
+# Program files copied by install.sh, install-macos.sh and install.ps1 - one per line.
+# static/ is copied as a whole; config.ini is merged with the installed one, never overwritten;
+# data files (stats.json, control.json...) are never part of an install.
+newgreedy.py
+newgreedy_addon.py
+engine_model.py
+engine_state.py
+newgreedy_web.py
+_version.py
+client_profiles.py
+updater.py
+config_merge.py
+config_schema.py
+datastore.py
+backups.py
+diagnostics.py
+requirements.txt
+MANIFEST.txt
+README.md
+LICENSE
+install.sh
+install-macos.sh
+install.ps1
+uninstall.sh
+Dockerfile
+docker-compose.yml
+docker-entrypoint.sh

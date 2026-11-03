@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NewGreedy v1.7.7 — emulated BitTorrent client profiles"""
+"""NewGreedy — emulated BitTorrent client profiles"""
 #
 # NewGreedy - BitTorrent announce proxy
 # Copyright (C) 2026  Mrt0t0

@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NewGreedy — Status</title>
+<link rel="stylesheet" href="/static/style.css?v=__NG_VERSION__">
+</head>
+<body>
+<nav>
+  <span class="brand">NewGreedy</span>
+  <div class="nav-links">
+    <a href="/"         data-page="dashboard">Dashboard</a>
+    <a href="/torrents" data-page="torrents">Torrents</a>
+    <a href="/charts"   data-page="charts">Charts</a>
+    <a href="/config"   data-page="config">Config</a>
+    <a href="/logs"     data-page="logs">Logs</a>
+    <a href="/status"   data-page="status">Status</a>
+    <a href="/help"     data-page="help">Help</a>
+  </div>
+  <div class="nav-right">
+    <a id="ubadge" href="#"></a>
+    <button id="ttheme">☀️</button>
+  </div>
+</nav>
+<main>
+
+<h1>Status</h1>
+<div class="cards">
+  <div class="card"><div class="clbl">Engine</div><div class="cval" id="s_engine">—</div></div>
+  <div class="card"><div class="clbl">Announces (session)</div><div class="cval ac" id="s_ann">—</div></div>
+  <div class="card"><div class="clbl">Last announce</div><div class="cval" id="s_last" style="font-size:18px">—</div></div>
+  <div class="card"><div class="clbl">stats.json</div><div class="cval" id="s_stats" style="font-size:18px">—</div></div>
+  <div class="card"><div class="clbl">Trash</div><div class="cval muted" id="s_trash" style="font-size:18px">—</div></div>
+  <div class="card"><div class="clbl">Backups</div><div class="cval muted" id="s_bk">—</div></div>
+</div>
+<div class="sec">
+  <div class="sec-t">🩺 Self-check <span id="s_sum"></span></div>
+  <div id="checks" class="muted">Loading…</div>
+  <div class="muted" style="font-size:12px;margin-top:10px">
+    The same checks run from a terminal, service stopped:
+    <span class="ic">python3 newgreedy.py --check-config</span>
+  </div>
+</div>
+<div class="sec">
+  <div class="sec-t">🧭 Connect your torrent client</div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px" id="clients">
+    <button class="btn active" onclick="showClient('qbittorrent',this)">qBittorrent</button>
+    <button class="btn" onclick="showClient('transmission',this)">Transmission</button>
+    <button class="btn" onclick="showClient('deluge',this)">Deluge</button>
+    <button class="btn" onclick="showClient('rtorrent',this)">rTorrent</button>
+    <button class="btn" onclick="showClient('docker',this)">Client in Docker</button>
+  </div>
+  <div id="howto" style="font-size:13px;line-height:1.9"></div>
+  <div class="sec" style="margin:14px 0 0;padding:14px">
+    <div class="sec-t" style="margin-bottom:8px">Live check</div>
+    <div id="probe" style="font-size:13px">Waiting…</div>
+    <div class="muted" style="font-size:12px;margin-top:6px">
+      Force a reannounce in your client (qBittorrent: right-click → <em>Force reannounce</em>):
+      the line above turns green as soon as NewGreedy sees it.
+    </div>
+  </div>
+</div>
+<div class="sec">
+  <div class="sec-t">📡 Trackers seen this session</div>
+  <div class="twrap"><table>
+    <thead><tr><th>Tracker</th><th>Last announce</th><th>Last answer</th><th>Errors in a row</th><th>Backoff</th></tr></thead>
+    <tbody id="trk"><tr><td colspan="5" class="muted" style="padding:14px">None yet</td></tr></tbody>
+  </table></div>
+</div>
+
+</main>
+<script src="/static/app.js?v=__NG_VERSION__"></script>
+<script>
+if (typeof ngUrl !== 'function') {
+  document.addEventListener('DOMContentLoaded', function () {
+    var d = document.createElement('div');
+    d.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:#f85149;color:#fff;padding:10px 14px;font:13px -apple-system,sans-serif;text-align:center';
+    d.innerHTML = 'static/app.js failed to load or is outdated. Force-reload the page (Ctrl+Shift+R / Cmd+Shift+R) or check that static/app.js is present on the server.';
+    document.body.insertBefore(d, document.body.firstChild);
+  });
+}
+</script>
+<script>
+var _st=null, _client='qbittorrent', _since=Date.now()/1000;
+var LV={ok:['OK','var(--ok)'],info:['INFO','var(--mu)'],warn:['WARN','var(--wa)'],error:['ERROR','var(--er)']};
+function hostPort(){
+  var p=(_st&&_st.proxy)||{host:'127.0.0.1',port:3456};
+  var h=p.host==='0.0.0.0'||p.host==='::'?'<address of this machine>':p.host;
+  return {host:h,port:p.port};
+}
+function showClient(c,el){
+  _client=c;
+  document.querySelectorAll('#clients .btn').forEach(b=>b.classList.remove('active'));
+  if(el) el.classList.add('active');
+  var hp=hostPort(), H='<span class="ic">'+esc(hp.host)+'</span>', P='<span class="ic">'+esc(hp.port)+'</span>';
+  var t={
+    qbittorrent:'<b>Settings → Connection → Proxy Server</b><br>Type <span class="ic">HTTP</span> · Host '+H+' · Port '+P
+      +'<br>☑ <em>Use proxy for tracker communication</em> · ☐ <em>Use proxy for peer connections</em>'
+      +'<br>HTTPS trackers: the torrent client must trust the mitmproxy CA (installer option --trust-ca / -TrustCA, or SSL_CERT_FILE on Linux; see README).',
+    transmission:'Transmission has no proxy setting of its own: start it with the environment variables<br>'
+      +'<span class="ic">http_proxy=http://'+esc(hp.host)+':'+esc(hp.port)+'</span> and <span class="ic">https_proxy=http://'+esc(hp.host)+':'+esc(hp.port)+'</span>'
+      +'<br>(systemd: <span class="ic">Environment=</span> lines in an override of transmission-daemon.service).',
+    deluge:'<b>Preferences → Proxy → Tracker</b><br>Type <span class="ic">HTTP</span> · Host '+H+' · Port '+P,
+    rtorrent:'In <span class="ic">.rtorrent.rc</span>: <span class="ic">network.http.proxy_address.set = "http://'+esc(hp.host)+':'+esc(hp.port)+'"</span>',
+    docker:'NewGreedy in Docker listens on <span class="ic">0.0.0.0</span> inside its container. From another container on the same '
+      +'Docker network use host <span class="ic">newgreedy</span>, port '+P+'. The compose file publishes the proxy on '
+      +'<span class="ic">127.0.0.1</span> of the host only.'
+  };
+  document.getElementById('howto').innerHTML=t[c];
+}
+function render(s){
+  _st=s;
+  var e=s.engine||{}, age=Date.now()/1000-(e.heartbeat||0);
+  var eng=document.getElementById('s_engine');
+  var up=e.state==='running'&&age<30;
+  eng.textContent=e.state==='failed'?'FAILED':up?'Running':'Down';
+  eng.className='cval '+(up?'ok':'er');
+  document.getElementById('s_ann').textContent=e.announces||0;
+  var la=e.last_announce||{};
+  document.getElementById('s_last').textContent=la.ts?fAge(la.ts):'none yet';
+  var f=s.files||{};
+  document.getElementById('s_stats').textContent=fB(f.stats_json)+' · '+f.history_max_points+' pts'
+    +(f.history_retention_days?' / '+f.history_retention_days+' d':'');
+  document.getElementById('s_trash').textContent=(f.trash_entries||0)+' · '+fB(f.trash_json);
+  document.getElementById('s_bk').textContent=f.backups||0;
+  var sum=LV[s.summary]||LV.info;
+  document.getElementById('s_sum').innerHTML='— <span style="color:'+sum[1]+'">'+sum[0]+'</span>';
+  document.getElementById('checks').innerHTML=(s.checks||[]).map(c=>{
+    var l=LV[c.level]||LV.info;
+    return '<div class="chk"><span class="lv tag" style="color:'+l[1]+';border:1px solid '+l[1]+'">'+l[0]+'</span>'
+      +'<div><div>'+esc(c.title)+'</div>'+(c.detail?'<div class="dt">'+esc(c.detail)+'</div>':'')+'</div></div>';
+  }).join('');
+  var p=document.getElementById('probe');
+  if(la.ts&&la.ts>=_since-5){
+    p.innerHTML='<span style="color:var(--ok)">✓ Announce received '+fAge(la.ts)+' from '+esc(la.tracker)+' for '+esc(la.hash)
+      +(la.event?' (event='+esc(la.event)+')':'')+'</span>';
+  }else if(la.ts){
+    p.innerHTML='<span class="muted">Last announce '+fAge(la.ts)+' ('+esc(la.tracker)+'). Waiting for a new one…</span>';
+  }else{
+    p.innerHTML='<span style="color:var(--wa)">No announce reached NewGreedy since it started.</span>';
+  }
+  var trk=Object.entries(e.trackers||{});
+  document.getElementById('trk').innerHTML=trk.length?trk.map(([d,v])=>
+    '<tr><td class="mono">'+esc(d)+'</td><td class="mono muted">'+fAge(v.last_ts)+'</td>'
+    +'<td class="mono">'+esc(v.last_code||'—')+'</td><td class="mono">'+esc(v.errors||0)+'</td>'
+    +'<td>'+(v.backoff?'<span class="tag stall">backoff</span>':'—')+'</td></tr>').join('')
+    :'<tr><td colspan="5" class="muted" style="padding:14px">None yet</td></tr>';
+}
+function load(){
+  API.get('/api/status').then(s=>{render(s);showClient(_client,null);})
+    .catch(e=>{document.getElementById('checks').innerHTML='<span style="color:var(--er)">'+esc(e.message)+'</span>';});
+}
+load(); setInterval(load,5000);
+showClient('qbittorrent',document.querySelector('#clients .btn'));
+
+initUI('status');
+</script>
+</body>
+</html>

@@ -1,18 +1,34 @@
-﻿param([switch]$Update, [switch]$Uninstall, [switch]$KeepScrape)
+param([switch]$Update, [switch]$Uninstall, [switch]$TrustCA, [switch]$KeepDefaults, [switch]$KeepScrape)
 
-$Version  = "v1.7.7"
+Set-Location $PSScriptRoot
+$Version  = ((Select-String -Path "_version.py" -Pattern '^VERSION\s*=\s*"(.*)"').Matches[0].Groups[1].Value)
 $Dest     = "$env:LOCALAPPDATA\NewGreedy"
 $TaskName = "NewGreedy"
 $LogFile  = "$Dest\install.log"
+$CaDir    = "$env:USERPROFILE\.mitmproxy"
+$CaPem    = "$CaDir\mitmproxy-ca-cert.pem"
 
 function Log($msg) {
   Write-Host "[NewGreedy $Version] $msg"
   Add-Content -Path $LogFile -Value "$(Get-Date -f 'HH:mm:ss') $msg" -ErrorAction SilentlyContinue
 }
 
+function CaThumbprint {
+  if (-not (Test-Path $CaPem)) { return $null }
+  try { return (New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($CaPem)).Thumbprint }
+  catch { return $null }
+}
+
 if ($Uninstall) {
   Log "Uninstalling..."
   Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+  # the CA must not stay trusted once its program is gone - this CA only, by its thumbprint:
+  # deleting by name would also remove the certificate of any other mitmproxy setup
+  $thumb = CaThumbprint
+  if ($thumb) {
+    certutil -delstore -user Root $thumb 2>$null | Out-Null
+    Log "mitmproxy CA $thumb removed from the user Root store."
+  }
   if (Test-Path $Dest) { Remove-Item -Recurse -Force $Dest }
   Log "Uninstalled."
   exit 0
@@ -20,103 +36,96 @@ if ($Uninstall) {
 
 Log "Starting install (update=$Update)..."
 
-try {
-  $pyVer = python --version 2>&1
-  Log "Python found: $pyVer"
-} catch {
+$pyVer = ""
+if (Get-Command python -ErrorAction SilentlyContinue) { $pyVer = (& python --version 2>&1) | Out-String }
+if ($pyVer -match 'Python 3\.') {
+  Log "Python found: $($pyVer.Trim())"
+} else {
   Log "Python not found. Downloading installer..."
   $pyInstaller = "$env:TEMP\python-installer.exe"
   Invoke-WebRequest "https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe" -OutFile $pyInstaller
+  # run it only when Windows confirms it is the installer signed by the PSF
+  $sig = Get-AuthenticodeSignature $pyInstaller
+  if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'Python Software Foundation') {
+    Remove-Item -Force $pyInstaller -ErrorAction SilentlyContinue
+    Log "ERROR: the downloaded Python installer is not signed by the Python Software Foundation ($($sig.Status)) - aborting."
+    exit 1
+  }
   Start-Process $pyInstaller -ArgumentList "/quiet InstallAllUsers=0 PrependPath=1" -Wait
+  Remove-Item -Force $pyInstaller -ErrorAction SilentlyContinue
+  # the installer edits PATH for new sessions only
+  $env:Path = [Environment]::GetEnvironmentVariable("Path", "User") + ";" + [Environment]::GetEnvironmentVariable("Path", "Machine")
   Log "Python installed."
 }
+$PyExe = (Get-Command python).Source
 
 Log "Installing Python dependencies..."
-python -m pip install -q --break-system-packages -r requirements.txt 2>$null; python -m pip install -q -r requirements.txt 2>$null
+& $PyExe -m pip install -q -r requirements.txt
+if ($LASTEXITCODE -ne 0) { Log "ERROR: pip install failed."; exit 1 }
 Log "Dependencies installed."
 
 New-Item -ItemType Directory -Force -Path "$Dest\static" | Out-Null
 New-Item -ItemType Directory -Force -Path "$Dest\torrents" | Out-Null
 
-$preserve = @("stats.json", "torrent_registry.json", "control.json", "purge_pending.json")
-$backup   = @{}
-$oldCfg   = $null
-if ($Update) {
-  foreach ($f in $preserve) {
-    $p = Join-Path $Dest $f
-    if (Test-Path $p) { $backup[$f] = Get-Content -Raw -Encoding UTF8 $p }
-  }
-  $cfgPath = Join-Path $Dest "config.ini"
-  if (Test-Path $cfgPath) {
-    $oldCfg = Join-Path $env:TEMP "newgreedy-config-previous.ini"
-    Copy-Item -Force $cfgPath $oldCfg
-  }
+# an installed config.ini is always merged, never replaced; data files are never copied
+$oldCfg = $null
+$cfgPath = Join-Path $Dest "config.ini"
+if (Test-Path $cfgPath) {
+  $oldCfg = Join-Path $env:TEMP "newgreedy-config-previous.ini"
+  Copy-Item -Force $cfgPath $oldCfg
 }
 
-$programFiles = @("newgreedy.py", "newgreedy_addon.py", "newgreedy_web.py", "_version.py",
-                  "client_profiles.py", "updater.py", "config_merge.py", "requirements.txt",
-                  "README.md", "LICENSE", "install.ps1", "install.sh", "install-macos.sh",
-                  "uninstall.sh", "Dockerfile", "docker-compose.yml", "config.ini")
+$programFiles = Get-Content "MANIFEST.txt" | Where-Object { $_.Trim() -and -not $_.TrimStart().StartsWith("#") }
 foreach ($f in $programFiles) {
+  $f = $f.Trim()
   if (Test-Path $f) { Copy-Item -Force $f (Join-Path $Dest $f) }
 }
+Copy-Item -Force "config.ini" $cfgPath
 Copy-Item -Force ".\static\*" (Join-Path $Dest "static")
 
-if ($Update) {
-  foreach ($f in $backup.Keys) {
-    Set-Content -Path (Join-Path $Dest $f) -Value $backup[$f] -Encoding UTF8 -NoNewline
+if ($oldCfg) {
+  Log "Merging config.ini - your settings into the $Version template..."
+  $mergeArgs = @("$Dest\config_merge.py", "--shipped", $cfgPath, "--current", $oldCfg, "--out", $cfgPath)
+  if ($KeepDefaults -or $KeepScrape) { $mergeArgs += "--keep-defaults" }
+  & $PyExe @mergeArgs
+  if ($LASTEXITCODE -eq 0) {
+    Log "config.ini merged."
+  } else {
+    Copy-Item -Force $oldCfg $cfgPath
+    Log "WARNING: merge failed - your previous config.ini was kept untouched."
   }
-  if ($oldCfg) {
-    Log "Merging config.ini - your settings into the $Version template..."
-    $mergeArgs = @("$Dest\config_merge.py", "--shipped", "$Dest\config.ini",
-                   "--current", $oldCfg, "--out", "$Dest\config.ini")
-    if ($KeepScrape) { $mergeArgs += "--keep-scrape" }
-    python @mergeArgs
-    if ($LASTEXITCODE -eq 0) {
-      Log "config.ini merged."
-    } else {
-      Copy-Item -Force $oldCfg "$Dest\config.ini"
-      Log "WARNING: merge failed - your previous config.ini was kept untouched."
-    }
-    Remove-Item -Force $oldCfg -ErrorAction SilentlyContinue
-  }
+  Remove-Item -Force $oldCfg -ErrorAction SilentlyContinue
   Log "Stats, registry, control file and torrents\ preserved."
 }
 Log "Files copied to $Dest"
 
-if (-not $Update) {
-  Log "Trusting mitmproxy CA certificate..."
-  python -c "from mitmproxy.certs import CertStore; CertStore.from_store(r'$env:USERPROFILE\.mitmproxy', 'mitmproxy')" 2>$null
-  $caPath = "$env:USERPROFILE\.mitmproxy\mitmproxy-ca-cert.p12"
-  if (Test-Path $caPath) {
-    certutil -addstore -user Root $caPath 2>$null
-    Log "CA certificate trusted in user store."
-  } else {
-    Log "WARNING: CA cert not found - trust manually via mitmproxy docs."
-  }
+if (-not (Test-Path $CaPem)) {
+  Log "Generating mitmproxy CA..."
+  & $PyExe -c "from mitmproxy.certs import CertStore; CertStore.from_store(r'$CaDir', 'mitmproxy', 2048)" 2>$null
+}
+if ($TrustCA -and (Test-Path "$CaDir\mitmproxy-ca-cert.p12")) {
+  certutil -addstore -user Root "$CaDir\mitmproxy-ca-cert.p12" 2>$null | Out-Null
+  Log "CA certificate trusted in the user store (thumbprint $(CaThumbprint))."
+} elseif (Test-Path $CaPem) {
+  Log "CA NOT added to the user Root store (pass -TrustCA to do so)."
+  Log "  HTTPS trackers need the torrent client to trust $CaPem"
 }
 
-if (-not $Update) {
-  $action   = New-ScheduledTaskAction -Execute "python" -Argument "`"$Dest\newgreedy.py`""
-  $trigger  = New-ScheduledTaskTrigger -AtLogOn
-  $settings = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
-  Register-ScheduledTask -Action $action -Trigger $trigger -Settings $settings `
-    -TaskName $TaskName -Description "NewGreedy $Version" -RunLevel Highest -Force | Out-Null
-  Log "Scheduled task registered (runs at logon)."
-  Start-ScheduledTask -TaskName $TaskName
-  Log "NewGreedy started."
-} else {
-  Stop-ScheduledTask  -TaskName $TaskName -ErrorAction SilentlyContinue
-  Start-Sleep -Seconds 2
-  Start-ScheduledTask -TaskName $TaskName
-  Log "NewGreedy restarted."
-}
+# a normal user task: the proxy needs no administrator rights
+$action   = New-ScheduledTaskAction -Execute $PyExe -Argument "`"$Dest\newgreedy.py`"" -WorkingDirectory $Dest
+$trigger  = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+$settings = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+Register-ScheduledTask -Action $action -Trigger $trigger -Settings $settings `
+  -TaskName $TaskName -Description "NewGreedy $Version" -RunLevel Limited -Force | Out-Null
+Start-Sleep -Seconds 2
+Start-ScheduledTask -TaskName $TaskName
+Log "Scheduled task registered (runs at logon, without administrator rights) and started."
 
 Log "Installation complete."
 Log "  Proxy  : 127.0.0.1:3456"
 Log "  Web UI : http://localhost:8080"
 Log "  Watch  : $Dest\torrents  (drop .torrent files here)"
-Log "  Proxy  : 127.0.0.1:3456"
-Log "  Web UI : http://localhost:8080"
+Log "  Check  : `"$PyExe`" `"$Dest\newgreedy.py`" --check-config"
 Write-Host ""
 Write-Host "Open Web UI : http://localhost:8080" -ForegroundColor Cyan

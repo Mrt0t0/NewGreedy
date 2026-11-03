@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>NewGreedy — Dashboard</title>
-<link rel="stylesheet" href="/static/style.css?v=1.7.7">
+<link rel="stylesheet" href="/static/style.css?v=__NG_VERSION__">
 </head>
 <body>
 <nav>
@@ -15,6 +15,7 @@
     <a href="/charts"   data-page="charts">Charts</a>
     <a href="/config"   data-page="config">Config</a>
     <a href="/logs"     data-page="logs">Logs</a>
+    <a href="/status"   data-page="status">Status</a>
     <a href="/help"     data-page="help">Help</a>
   </div>
   <div class="nav-right">
@@ -49,7 +50,7 @@
 <div class="twrap">
   <table>
     <thead><tr>
-      <th>Hash</th><th>Mode</th><th>DL</th><th>UL</th>
+      <th>Torrent</th><th>Mode</th><th>DL</th><th>UL</th>
       <th>Ratio</th><th>Progress</th><th>ETA</th><th>Ann#</th><th>Status</th>
     </tr></thead>
     <tbody id="tbody"><tr><td colspan="9" style="text-align:center;padding:20px" class="muted">Loading…</td></tr></tbody>
@@ -58,7 +59,7 @@
 <div class="ts" id="ts" style="margin-top:8px"></div>
 
 </main>
-<script src="/static/app.js?v=1.7.7"></script>
+<script src="/static/app.js?v=__NG_VERSION__"></script>
 <script>
 if (typeof ngUrl !== 'function') {
   document.addEventListener('DOMContentLoaded', function () {
@@ -74,7 +75,7 @@ if (typeof ngUrl !== 'function') {
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 
-var _data={}, _filter='all', _tgt=1.6;
+var _data={}, _filter='all', _tgt=1.6, _seedMb=500;
 function setF(f,el){
   _filter=f;
   document.querySelectorAll('.toolbar .btn').forEach(b=>b.classList.remove('active'));
@@ -102,12 +103,12 @@ function render(){
       ? Math.round(Math.max(0,d.cumul_rep_dl*_tgt-d.cumul_rep_ul)/(d.cumul_rep_ul/d.ann_count))
       : 0;
     return '<tr>'
-      +'<td class="mono"><a href="/charts?ih='+ih+'" style="color:var(--mu)">'+ih+'</a></td>'
+      +'<td class="mono"><a href="'+ngUrl('/charts?ih='+encodeURIComponent(ih))+'" title="'+esc(ih)+'" style="color:var(--mu)">'+fName(d,ih)+'</a></td>'
       +'<td>'+modeTxt(d)+'</td>'
       +'<td class="mono">'+fB(d.cumul_rep_dl)+'</td>'
       +'<td class="mono">'+fB(d.cumul_rep_ul)+'</td>'
       +'<td class="mono">'+(r!=null?fR(r):'—')+'</td>'
-      +'<td>'+rbar(r,_tgt)+'</td>'
+      +'<td>'+progBar(d,_tgt,_seedMb)+'</td>'
       +'<td class="mono muted">'+fE(eta)+'</td>'
       +'<td class="mono muted">'+(d.ann_count||0)+'</td>'
       +'<td>'+stag(d)+'</td>'
@@ -118,6 +119,7 @@ function load(){
   Promise.all([API.get('/api/stats'),API.get('/api/config')])
   .then(([s,c])=>{
     _tgt=parseFloat((c.spoofing&&c.spoofing.target_ratio)||1.6)||1.6;
+    _seedMb=parseFloat((c.spoofing&&c.spoofing.seed_target_mb)||500)||0;
     _data=s;
     var v=Object.values(s);
     document.getElementById('c_tot').textContent=v.length;
@@ -131,7 +133,7 @@ function load(){
     render();
   })
   .catch(e=>{
-    document.getElementById('tbody').innerHTML='<tr><td colspan="9" style="text-align:center;padding:20px;color:var(--er)">API error: '+e.message+'</td></tr>';
+    document.getElementById('tbody').innerHTML='<tr><td colspan="9" style="text-align:center;padding:20px;color:var(--er)">API error: '+esc(e.message)+'</td></tr>';
   });
   API.get('/api/config').then(c=>{
     var on=((c.simulation||{}).dry_run||'false').toString().toLowerCase()==='true';
@@ -142,7 +144,7 @@ function load(){
       +'🧪 <b>Simulation mode</b> — announces are computed and logged but left unmodified. '
       +'Set <span class="ic">dry_run = false</span> to inject for real.</div>';
   }).catch(()=>{});
-  fetch(ngUrl('/api/udp_status')).then(r=>r.json()).then(u=>{
+  API.get('/api/udp_status').then(u=>{
     var w=document.getElementById('udp_warn');
     if(!u.udp_detected){w.style.display='none';return;}
     var doms=Object.keys(u.domains||{});
@@ -150,17 +152,17 @@ function load(){
     w.innerHTML='<div style="background:rgba(248,81,73,.08);border:1px solid var(--er);border-radius:var(--r);padding:10px 14px;font-size:13px;color:var(--er)">'
       +'⚠ <b>UDP trackers detected</b> — '+u.affected_count+' torrent(s) announce to '+doms.length+' UDP domain(s). '
       +'These announces bypass the HTTP proxy and report <b>real</b> statistics. '
-      +'<span class="muted">('+doms.slice(0,4).join(', ')+(doms.length>4?', …':'')+')</span>'
+      +'<span class="muted">('+doms.slice(0,4).map(esc).join(', ')+(doms.length>4?', …':'')+')</span>'
       +'</div>';
   }).catch(()=>{});
-  fetch(ngUrl('/api/tracker_stats')).then(r=>r.json()).then(tc=>{
+  API.get('/api/tracker_stats').then(tc=>{
     var w=document.getElementById('tracker_warn');
     var alerts=Object.entries(tc).filter(([d,v])=>v.pct_of_cap!=null&&v.pct_of_cap>=80);
     if(!alerts.length){w.style.display='none';return;}
     w.style.display='block';
     w.innerHTML='<div style="background:rgba(210,153,34,.1);border:1px solid var(--wa);border-radius:var(--r);padding:10px 14px;font-size:13px;color:var(--wa)">'
       +'⚠ Global ratio cap warning: '
-      +alerts.map(([d,v])=>'<b>'+d+'</b> at '+v.ratio.toFixed(3)+' / '+v.cap+' ('+v.pct_of_cap.toFixed(0)+'%)').join(', ')
+      +alerts.map(([d,v])=>'<b>'+esc(d)+'</b> at '+v.ratio.toFixed(3)+' / '+esc(v.cap)+' ('+v.pct_of_cap.toFixed(0)+'%)').join(', ')
       +'</div>';
   }).catch(()=>{});
 }

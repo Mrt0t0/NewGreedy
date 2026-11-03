@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NewGreedy v1.7.7 — Web UI & API"""
+"""NewGreedy — Web UI & API"""
 #
 # NewGreedy - BitTorrent announce proxy
 # Copyright (C) 2026  Mrt0t0
@@ -18,41 +18,43 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #
 import hmac, io, json, os, pathlib, logging, asyncio, re, time, threading, zipfile
+import urllib.parse
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Query, Request, Body
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse, PlainTextResponse
-from _version import (VERSION, fetch_latest, parse_version, notify_configure,
-                      torrent_info, tracker_urls, atomic_write_json, atomic_write_bytes)
+from fastapi.responses import (JSONResponse, HTMLResponse, StreamingResponse, PlainTextResponse,
+                               RedirectResponse, Response)
+from _version import (VERSION, parse_version, notify_configure, notify_test,
+                      torrent_info, torrent_name, tracker_urls, atomic_write_bytes)
+import backups
 import client_profiles
+import config_schema as cs
+import datastore
+import diagnostics
 import updater
+
 
 @asynccontextmanager
 async def _lifespan(_app):
-    if _WATCH_FOLDER:
-        logger.info("Watch folder enabled: %s", _WATCH_FOLDER)
-        task = asyncio.create_task(_watch_loop())
-        try:
-            yield
-        finally:
-            task.cancel()
-    else:
+    task = asyncio.create_task(_watch_loop())
+    try:
         yield
+    finally:
+        task.cancel()
 
 
 app      = FastAPI(title="NewGreedy Web UI", lifespan=_lifespan)
 _cfg     = None
 logging.getLogger("passlib").setLevel(logging.ERROR)
 logger   = logging.getLogger("NewGreedy.Web")
-BASE_DIR = pathlib.Path(__file__).parent.resolve()
-STATS_FILE         = BASE_DIR / "stats.json"
-PURGE_PENDING_FILE = BASE_DIR / "purge_pending.json"
-REGISTRY_FILE      = BASE_DIR / "torrent_registry.json"
-LOG_FILE           = BASE_DIR / "newgreedy.log"
-STATIC_DIR         = BASE_DIR / "static"
-CONFIG_FILE        = BASE_DIR / "config.ini"
-CONTROL_FILE       = BASE_DIR / "control.json"
+BASE_DIR = datastore.BASE_DIR
+STATS_FILE    = datastore.STATS_FILE
+REGISTRY_FILE = datastore.REGISTRY_FILE
+LOG_FILE      = datastore.LOG_FILE
+STATIC_DIR    = datastore.STATIC_DIR
+CONFIG_FILE   = datastore.CONFIG_FILE
+CONTROL_FILE  = datastore.CONTROL_FILE
 
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -61,11 +63,21 @@ VALID_HASH_RE   = re.compile(r"^[0-9a-f]{8,40}$")
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024
 TOKEN_COOKIE    = "ng_token"
 WATCH_INTERVAL  = 15
+LOGIN_RATE      = 10
+PAGES           = {"torrents", "charts", "config", "logs", "help", "status"}
+PAGE_PATHS      = {"/"} | {"/" + p for p in PAGES}
+PUBLIC_PATHS    = {"/api/health", "/api/login", "/api/logout"}
+SAFE_METHODS    = {"GET", "HEAD", "OPTIONS"}
+CSP = ("default-src 'self'; script-src 'self' 'unsafe-inline'; "
+       "style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; "
+       "frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 
-_SECRET_TOKEN = ""
-_PATH_PREFIX  = ""
-_RATE_LIMIT   = 0
-_WATCH_FOLDER = ""
+_SECRET_TOKEN    = ""
+_PATH_PREFIX     = ""
+_RATE_LIMIT      = 0
+_WATCH_FOLDER    = ""
+_ALLOWED_ORIGINS = set()
+_cfg_mtime       = 0.0
 
 _rate_buckets = defaultdict(deque)
 _rate_lock    = threading.Lock()
@@ -74,209 +86,278 @@ _raw_cache      = None
 _raw_cache_ts   = 0.0
 _raw_cache_ttl  = 2.0
 
-EDITABLE_KEYS = {
-    ("spoofing", "target_ratio"), ("spoofing", "target_ratio_buffer"),
-    ("spoofing", "catch_up_factor"), ("spoofing", "max_ratio_per_torrent"),
-    ("spoofing", "max_global_ratio_per_tracker"), ("spoofing", "max_simulated_speed_mbps"),
-    ("spoofing", "upload_noise_pct"), ("spoofing", "stagnation_probability"),
-    ("spoofing", "seed_credit_mb"), ("spoofing", "seed_target_mb"),
-    ("spoofing", "auto_stop_at_target"), ("spoofing", "anti_clustering"),
-    ("advanced", "min_announce_interval"), ("advanced", "log_level"),
-    ("advanced", "inject_hours"), ("advanced", "interval_jitter_pct"),
-    ("advanced", "stall_announce_threshold"), ("advanced", "min_announces_before_stagnation"),
-    ("advanced", "corrupt_field_probability"),
-    ("advanced", "respect_tracker_interval"),
-    ("anti_detection", "user_agent_mode"), ("anti_detection", "user_agent_value"),
-    ("anti_detection", "spoof_user_agent"), ("anti_detection", "spoof_peer_id"),
-    ("anti_detection", "spoof_peers"), ("anti_detection", "spoof_port"),
-    ("anti_detection", "spoof_headers"), ("anti_detection", "intercept_scrape"),
-    ("anti_detection", "echo_trackerid"),
-    ("anti_detection", "tracker_whitelist"), ("anti_detection", "tracker_blacklist"),
-    ("anti_detection", "desync_announces"), ("anti_detection", "desync_spread_pct"),
-    ("anti_detection", "desync_min_gap"), ("anti_detection", "startup_burst"),
-    ("anti_detection", "startup_burst_window"), ("anti_detection", "startup_ramp_floor"),
-    ("stats", "persist_stats"), ("stats", "auto_purge_stopped"),
-    ("stats", "tracker_cumul_ttl_days"), ("stats", "stopped_purge_delay"),
-    ("client", "client_profile"), ("client", "rotate_profile_on_restart"),
-    ("client", "session_identity"), ("client", "version_bump_probability"),
-    ("bandwidth", "global_max_speed_mbps"), ("bandwidth", "per_torrent_speed_cap_mbps"),
-    ("bandwidth", "max_download_speed_mbps"),
-    ("bandwidth", "circadian_smoothing"), ("bandwidth", "circadian_night_factor"),
-    ("notifications", "webhook_format"), ("notifications", "webhook_events"),
-    ("simulation", "dry_run"),
-}
-
-
-KEY_RULES = {
-    "target_ratio": ("float", 0.01, 100.0), "target_ratio_buffer": ("float", 0.0, 10.0),
-    "catch_up_factor": ("float", 0.001, 1.0), "max_ratio_per_torrent": ("float", 0.01, 100.0),
-    "max_global_ratio_per_tracker": ("float", 0.01, 100.0),
-    "max_simulated_speed_mbps": ("float", 0.01, 10000.0),
-    "upload_noise_pct": ("float", 0.0, 100.0), "stagnation_probability": ("float", 0.0, 1.0),
-    "seed_credit_mb": ("float", 0.0, 100000.0), "seed_target_mb": ("float", 0.0, 1e7),
-    "min_announce_interval": ("int", 60, 86400),
-    "stall_announce_threshold": ("int", 1, 1000),
-    "min_announces_before_stagnation": ("int", 0, 1000),
-    "interval_jitter_pct": ("float", 0.0, 1.0),
-    "corrupt_field_probability": ("float", 0.0, 1.0),
-    "desync_spread_pct": ("float", 0.0, 0.45), "desync_min_gap": ("int", 0, 3600),
-    "startup_burst_window": ("int", 0, 86400), "startup_ramp_floor": ("float", 0.0, 1.0),
-    "tracker_cumul_ttl_days": ("int", 0, 3650),
-    "stopped_purge_delay": ("int", 0, 86400),
-    "version_bump_probability": ("float", 0.0, 1.0),
-    "global_max_speed_mbps": ("float", 0.0, 10000.0),
-    "per_torrent_speed_cap_mbps": ("float", 0.01, 10000.0),
-    "max_download_speed_mbps": ("float", 0.0, 10000.0),
-    "circadian_night_factor": ("float", 0.0, 1.0),
-    "auto_stop_at_target": ("bool",), "anti_clustering": ("bool",),
-    "respect_tracker_interval": ("bool",), "spoof_user_agent": ("bool",),
-    "spoof_peer_id": ("bool",), "spoof_peers": ("bool",), "spoof_port": ("bool",),
-    "spoof_headers": ("bool",), "intercept_scrape": ("bool",),
-    "desync_announces": ("bool",), "startup_burst": ("bool",),
-    "echo_trackerid": ("bool",),
-    "persist_stats": ("bool",), "auto_purge_stopped": ("bool",),
-    "rotate_profile_on_restart": ("bool",), "circadian_smoothing": ("bool",),
-    "dry_run": ("bool",),
-    "log_level": ("choice", ("DEBUG", "INFO", "WARNING", "ERROR")),
-    "user_agent_mode": ("choice", ("random", "fixed")),
-    "session_identity": ("choice", ("stable", "drift", "rotate")),
-    "webhook_format": ("choice", ("generic", "discord", "slack")),
-    "inject_hours": ("hours",), "client_profile": ("profile",),
-}
-
-_BOOLS = {"true", "false", "yes", "no", "on", "off", "1", "0"}
-
-
-def _validate_value(key: str, value: str):
-    rule = KEY_RULES.get(key)
-    if not rule:
-        return None
-    kind = rule[0]
-    if kind in ("float", "int"):
-        try:
-            num = float(value) if kind == "float" else int(value)
-        except ValueError:
-            return f"{key} must be a{'' if kind == 'int' else ' decimal'} number"
-        if not (rule[1] <= num <= rule[2]):
-            return f"{key} must be between {rule[1]} and {rule[2]}"
-        return None
-    if kind == "bool":
-        return None if value.lower() in _BOOLS else f"{key} must be true or false"
-    if kind == "choice":
-        return None if value.lower() in [c.lower() for c in rule[1]] else \
-            f"{key} must be one of: {', '.join(rule[1])}"
-    if kind == "hours":
-        m = re.fullmatch(r"(\d{1,2})-(\d{1,2})", value)
-        if not m or not all(0 <= int(g) <= 23 for g in m.groups()):
-            return "inject_hours must look like 8-22, with both values between 0 and 23"
-        return None
-    if kind == "profile":
-        allowed = client_profiles.profile_names() + ["random"]
-        return None if value.lower() in allowed else f"client_profile must be one of: {', '.join(allowed)}"
-    return None
+EDITABLE_KEYS = cs.EDITABLE_KEYS
+# URLs that can carry a secret: True = the path too (webhook tokens), False = the password only
+MASKED_URLS = {("notifications", "webhook_url"): True, ("upstream", "proxy_url"): False}
+MASK = "***"
 
 
 def set_config(c):
-    global _cfg, _SECRET_TOKEN, _PATH_PREFIX, _RATE_LIMIT, _WATCH_FOLDER
+    global _cfg, _SECRET_TOKEN, _PATH_PREFIX, _RATE_LIMIT, _WATCH_FOLDER, _ALLOWED_ORIGINS, _cfg_mtime
+    first = _cfg is None
     _cfg = c
-    _SECRET_TOKEN = (c.get("web", "web_secret_token", fallback="") or "").strip()
-    _PATH_PREFIX  = (c.get("web", "web_path_prefix", fallback="") or "").strip().strip("/")
+    _cfg_mtime = _mtime(CONFIG_FILE)
+    _SECRET_TOKEN = cs.get(c, "web", "web_secret_token")
+    raw_token = c.get("web", "web_secret_token", fallback="").strip() if c is not None else ""
+    if raw_token and not _SECRET_TOKEN:
+        # a token was meant but cannot be used: lock the UI rather than open it
+        _SECRET_TOKEN = cs.new_token()
+        logger.error("web_secret_token in config.ini is not valid (8 to 256 printable characters, "
+                     "no spaces) - the web UI refuses every sign-in until it is fixed")
+    _PATH_PREFIX  = cs.get(c, "web", "web_path_prefix")
+    _RATE_LIMIT   = cs.get(c, "web", "web_rate_limit")
+    _WATCH_FOLDER = (cs.get(c, "advanced", "watch_folder") or "").strip()
+    _ALLOWED_ORIGINS = {o.rstrip("/") for o in cs.get(c, "web", "web_allowed_origins")}
     try:
-        _RATE_LIMIT = int(c.get("web", "web_rate_limit", fallback="240"))
-    except Exception:
-        _RATE_LIMIT = 240
-    _WATCH_FOLDER = (c.get("advanced", "watch_folder", fallback="") or "").strip()
-    try:
-        notify_configure(
-            c.get("notifications", "webhook_url", fallback=""),
-            c.get("notifications", "webhook_format", fallback="generic"),
-            c.get("notifications", "webhook_events", fallback=""),
-        )
+        notify_configure(cs.get(c, "notifications", "webhook_url"),
+                         cs.get(c, "notifications", "webhook_format"),
+                         cs.get(c, "notifications", "webhook_events"),
+                         cs.get(c, "notifications", "webhook_chat_id"))
     except Exception as e:
         logger.debug("notifier config error: %s", e)
+    if not first:
+        return
+    host = cs.get(c, "web", "web_host")
     if _SECRET_TOKEN:
         logger.info("Web UI authentication enabled")
-    else:
-        host = (c.get("web", "web_host", fallback="0.0.0.0") or "").strip()
-        if host not in ("127.0.0.1", "localhost", "::1"):
-            logger.warning(
-                "Web UI bound to %s with no web_secret_token - anyone who can reach "
-                "port %s may read stats, purge data, restore backups and trigger updates",
-                host, c.get("web", "web_port", fallback="8080"))
+    elif not cs.is_loopback(host):
+        logger.warning("Web UI bound to %s with no web_secret_token - anyone who can reach "
+                       "port %s may read stats, purge data, restore backups and trigger updates",
+                       host, cs.get(c, "web", "web_port"))
     if _PATH_PREFIX:
         logger.info("Web UI served under /%s/", _PATH_PREFIX)
+    if _WATCH_FOLDER:
+        logger.info("Watch folder enabled: %s", datastore.resolve_data_path(_WATCH_FOLDER))
 
 
-def _rate_ok(ip: str) -> bool:
-    if _RATE_LIMIT <= 0:
+def _mtime(path):
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0
+
+
+def _config():
+    """The current config.ini, re-read when the file changed (UI edit, restore, hand edit)."""
+    m = _mtime(CONFIG_FILE)
+    if _cfg is None or (m and m != _cfg_mtime):
+        set_config(cs.load(CONFIG_FILE))
+    return _cfg
+
+
+# ── access control ────────────────────────────────────────────────────────────
+
+def _rate_ok(ip: str, bucket_name: str = "api", limit: int = None) -> bool:
+    limit = _RATE_LIMIT if limit is None else limit
+    if limit <= 0:
         return True
     now = time.monotonic()
     with _rate_lock:
-        bucket = _rate_buckets[ip]
+        bucket = _rate_buckets[(bucket_name, ip)]
         while bucket and now - bucket[0] > 60:
             bucket.popleft()
         if len(_rate_buckets) > 512:
             for k in [k for k, v in list(_rate_buckets.items()) if not v]:
                 del _rate_buckets[k]
-        if len(bucket) >= _RATE_LIMIT:
+        if len(bucket) >= limit:
             return False
         bucket.append(now)
     return True
 
 
-def _token_ok(request: Request) -> bool:
+def _same_token(supplied: str) -> bool:
+    return bool(_SECRET_TOKEN) and hmac.compare_digest(
+        (supplied or "").encode("utf-8"), _SECRET_TOKEN.encode("utf-8"))
+
+
+def _token_ok(conn) -> bool:
     if not _SECRET_TOKEN:
         return True
-    supplied = (
-        request.query_params.get("token")
-        or request.headers.get("X-Auth-Token")
-        or request.cookies.get(TOKEN_COOKIE)
-        or ""
-    )
-    return hmac.compare_digest(supplied, _SECRET_TOKEN)
+    supplied = (conn.headers.get("X-Auth-Token")
+                or conn.cookies.get(TOKEN_COOKIE)
+                or conn.query_params.get("token")
+                or "")
+    return _same_token(supplied)
+
+
+def _host_ok(conn) -> bool:
+    """Without a token, only answer to loopback names (or a configured origin): a page
+    whose DNS name is rebound to 127.0.0.1 would otherwise pass as same-origin."""
+    if _SECRET_TOKEN:
+        return True
+    host = urllib.parse.urlsplit("//" + (conn.headers.get("host") or "")).hostname or ""
+    if cs.is_loopback(host):
+        return True
+    return any(urllib.parse.urlsplit(o).hostname == host for o in _ALLOWED_ORIGINS)
+
+
+def _origin_ok(conn) -> bool:
+    """Reject requests a browser sends on behalf of another site (CSRF, cross-site WebSocket)."""
+    origin = conn.headers.get("origin")
+    if origin is None:
+        ref = conn.headers.get("referer")
+        if not ref:
+            return conn.headers.get("sec-fetch-site", "same-origin") in ("same-origin", "none")
+        origin = ref
+    if origin == "null":
+        return False
+    parts = urllib.parse.urlsplit(origin)
+    if parts.netloc.lower() == (conn.headers.get("host") or "").lower():
+        return True
+    return f"{parts.scheme}://{parts.netloc}".lower() in _ALLOWED_ORIGINS
+
+
+def _set_cookie(response, request, token):
+    response.set_cookie(TOKEN_COOKIE, token, httponly=True, samesite="strict", path="/",
+                        secure=request.url.scheme == "https")
+
+
+def _page_file(name):
+    f = STATIC_DIR / f"{name}.html"
+    if not f.exists():
+        return f"<h1>NewGreedy {VERSION}</h1>"
+    # cache-busting query strings follow the running version
+    return f.read_text(encoding="utf-8").replace("__NG_VERSION__", VERSION.lstrip("v"))
 
 
 @app.middleware("http")
 async def _guard(request: Request, call_next):
+    _config()
     path = request.url.path
-    if _PATH_PREFIX and not path.startswith("/static/"):
-        want = "/" + _PATH_PREFIX
-        if path == want:
-            path = "/"
-        elif path.startswith(want + "/"):
-            path = path[len(want):] or "/"
-        else:
-            return PlainTextResponse("Not found", status_code=404)
-        request.scope["path"] = path
-        request.scope["raw_path"] = path.encode()
     client_ip = request.client.host if request.client else "unknown"
+    if path == "/api/health" or path.startswith("/static/"):
+        return await call_next(request)
+    if not _host_ok(request):
+        return JSONResponse({"error": "unexpected Host header - set web_secret_token or "
+                                      "web_allowed_origins to reach the UI by this name"},
+                            status_code=421)
     rate_limited = path.startswith("/api/") or path == "/metrics"
     if rate_limited and not _rate_ok(client_ip):
         return JSONResponse({"error": "rate limit exceeded"}, status_code=429)
+    if request.method not in SAFE_METHODS and not _origin_ok(request):
+        return JSONResponse({"error": "cross-site request refused"}, status_code=403)
+    if path in PUBLIC_PATHS:
+        if path == "/api/login" and not _rate_ok(client_ip, "login", LOGIN_RATE):
+            return JSONResponse({"error": "too many attempts, wait a minute"}, status_code=429)
+        return await call_next(request)
     if not _token_ok(request):
         if not rate_limited and not _rate_ok(client_ip):
             return JSONResponse({"error": "rate limit exceeded"}, status_code=429)
+        if request.method == "GET" and path in PAGE_PATHS:
+            return HTMLResponse(_page_file("login"), status_code=200,
+                                headers={"Cache-Control": "no-store", "Content-Security-Policy": CSP})
         return JSONResponse({"error": "unauthorized"}, status_code=401)
+    if (_SECRET_TOKEN and request.method == "GET" and path in PAGE_PATHS
+            and request.query_params.get("token")):
+        query = [(k, v) for k, v in request.query_params.multi_items() if k != "token"]
+        target = (("/" + _PATH_PREFIX) if _PATH_PREFIX else "") + (path if path != "/" else "/")
+        if query:
+            target += "?" + urllib.parse.urlencode(query)
+        response = RedirectResponse(target, status_code=303)
+        _set_cookie(response, request, _SECRET_TOKEN)
+        return response
     response = await call_next(request)
-    if request.url.path in ("/", "/torrents", "/charts", "/config", "/logs", "/help"):
+    if path in PAGE_PATHS:
         response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
-    if _SECRET_TOKEN and request.query_params.get("token") == _SECRET_TOKEN:
-        response.set_cookie(TOKEN_COOKIE, _SECRET_TOKEN, httponly=True, samesite="strict")
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers.setdefault("Content-Security-Policy", CSP)
     return response
 
 
-def _read_stats_file():
+class PrefixMiddleware:
+    """Serve everything under /<web_path_prefix>/, HTTP and WebSocket alike."""
+
+    def __init__(self, asgi_app):
+        self.app = asgi_app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] in ("http", "websocket") and _PATH_PREFIX:
+            path = scope.get("path", "")
+            want = "/" + _PATH_PREFIX
+            if path.startswith("/static/") or path == "/api/health":
+                pass
+            elif path == want or path.startswith(want + "/"):
+                new = path[len(want):] or "/"
+                scope = dict(scope, path=new, raw_path=new.encode())
+            elif scope["type"] == "http":
+                await PlainTextResponse("Not found", status_code=404)(scope, receive, send)
+                return
+            else:
+                await send({"type": "websocket.close", "code": 1008})
+                return
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(PrefixMiddleware)
+
+
+@app.post("/api/login")
+async def api_login(request: Request, payload: dict = Body(default={})):
+    token = str(payload.get("token", ""))
+    if not _SECRET_TOKEN:
+        return {"status": "ok", "auth": False}
+    if not _same_token(token):
+        return JSONResponse({"error": "wrong token"}, status_code=401)
+    response = JSONResponse({"status": "ok", "auth": True})
+    _set_cookie(response, request, _SECRET_TOKEN)
+    return response
+
+
+@app.post("/api/logout")
+async def api_logout():
+    response = JSONResponse({"status": "ok"})
+    response.delete_cookie(TOKEN_COOKIE, path="/")
+    return response
+
+
+@app.get("/api/token")
+def api_token_info():
+    c = _config()
+    return {"enabled": bool(_SECRET_TOKEN), "web_host": cs.get(c, "web", "web_host"),
+            "loopback": cs.is_loopback(cs.get(c, "web", "web_host")),
+            "hint": ("…" + _SECRET_TOKEN[-4:]) if _SECRET_TOKEN else ""}
+
+
+@app.post("/api/token/rotate")
+def api_token_rotate(request: Request):
+    token = cs.new_token()
+    try:
+        cs.set_value(CONFIG_FILE, "web", "web_secret_token", token)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    set_config(cs.load(CONFIG_FILE))
+    logger.info("[TOKEN] web UI token rotated")
+    response = JSONResponse({"status": "ok", "token": token,
+                             "note": "copy it now - it is not shown again"})
+    _set_cookie(response, request, token)
+    return response
+
+
+@app.post("/api/token/clear")
+def api_token_clear():
+    c = _config()
+    if not cs.is_loopback(cs.get(c, "web", "web_host")):
+        return JSONResponse({"error": "the web UI listens beyond this machine - a token is required"},
+                            status_code=409)
+    cs.set_value(CONFIG_FILE, "web", "web_secret_token", "")
+    set_config(cs.load(CONFIG_FILE))
+    logger.info("[TOKEN] web UI token removed")
+    return {"status": "ok"}
+
+
+# ── data helpers ──────────────────────────────────────────────────────────────
+
+def _read_stats_file(cached=True):
     global _raw_cache, _raw_cache_ts
     now = time.monotonic()
-    if _raw_cache is not None and (now - _raw_cache_ts) < _raw_cache_ttl:
+    if cached and _raw_cache is not None and (now - _raw_cache_ts) < _raw_cache_ttl:
         return _raw_cache
-    try:
-        with open(STATS_FILE, encoding="utf-8") as f:
-            raw = json.load(f)
-    except Exception:
-        raw = {}
+    raw = datastore.read_json(STATS_FILE, {})
+    raw = raw if isinstance(raw, dict) else {}
     _raw_cache    = raw
     _raw_cache_ts = now
     return raw
@@ -287,31 +368,17 @@ def _invalidate_cache():
     _raw_cache = None
 
 
-def _write_purge_pending(hashes: list):
-    try:
-        existing = []
-        if PURGE_PENDING_FILE.exists():
-            existing = json.loads(PURGE_PENDING_FILE.read_text(encoding="utf-8"))
-        merged = sorted(set(existing) | set(hashes))
-        atomic_write_json(PURGE_PENDING_FILE, merged)
-    except Exception as e:
-        logger.warning("purge_pending write error: %s", e)
-
-
 def _sanitize_filename(name: str) -> str:
     if not name:
         return ""
-    name = name.replace("\x00", "").replace("\n", " ").replace("\r", " ")
+    name = re.sub(r"[\x00-\x1f\x7f]", " ", name)
     name = re.sub(r"[\\/]", "_", name)
     return name[:255].strip()
 
 
 def _load_control():
-    try:
-        with open(CONTROL_FILE, encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
-        data = {}
+    data = datastore.read_json(CONTROL_FILE, {})
+    data = data if isinstance(data, dict) else {}
     return {
         "paused":    list(data.get("paused", [])),
         "overrides": dict(data.get("overrides", {})),
@@ -319,27 +386,22 @@ def _load_control():
     }
 
 
-def _save_control(ctl):
+def _edit_control(fn):
+    def apply(data):
+        data.setdefault("paused", [])
+        data.setdefault("overrides", {})
+        data.setdefault("tags", {})
+        return fn(data)
     try:
-        atomic_write_json(CONTROL_FILE, ctl)
-        return True
+        return datastore.update_json(CONTROL_FILE, apply, {}), None
     except Exception as e:
         logger.warning("control write error: %s", e)
-        return False
-
+        return None, JSONResponse({"error": "could not write control file"}, status_code=500)
 
 
 def _load_registry():
-    try:
-        with open(REGISTRY_FILE, encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
-def _save_registry(reg):
-    atomic_write_json(REGISTRY_FILE, reg)
+    data = datastore.read_json(REGISTRY_FILE, {})
+    return data if isinstance(data, dict) else {}
 
 
 def _load_stats():
@@ -354,8 +416,7 @@ def _load_stats():
 
 
 def _load_tracker_cumul():
-    raw = _read_stats_file()
-    tc = raw.get("_tracker_cumul", {})
+    tc = _read_stats_file().get("_tracker_cumul", {})
     return tc if isinstance(tc, dict) else {}
 
 
@@ -376,14 +437,50 @@ def _tail_log(n=500):
         return []
 
 
-@app.get("/", response_class=HTMLResponse)
-async def index():
-    f = STATIC_DIR / "index.html"
-    return f.read_text(encoding="utf-8") if f.exists() else "<h1>NewGreedy v1.7.7</h1>"
+def _tracker_cap(c, domain):
+    base = cs.get(c, "spoofing", "max_global_ratio_per_tracker")
+    for section in c.sections():
+        if section.lower() == f"tracker:{domain}".lower() and c.has_option(section, "max_global_ratio_per_tracker"):
+            value, problem = cs.tracker_value("max_global_ratio_per_tracker",
+                                              c.get(section, "max_global_ratio_per_tracker"))
+            if not problem:
+                return value
+    return base
 
+
+def _hash_param(value) -> str:
+    return str(value or "")[:40].lower()
+
+
+def _ctl_get(mapping, ih, default=None):
+    """Control entry of a torrent, also under the 8-digit key of older versions."""
+    k = datastore.alias_key(mapping, ih)
+    return mapping[k] if k is not None else default
+
+
+def _drop_alias(mapping, ih):
+    """Remove the legacy 8-digit entry of a torrent now written under its full hash."""
+    short = ih[:datastore.SHORT_HASH_LEN]
+    if short == ih:
+        return None
+    if isinstance(mapping, list):
+        if short in mapping:
+            mapping.remove(short)
+        return None
+    return mapping.pop(short, None)
+
+
+# ── pages ─────────────────────────────────────────────────────────────────────
+
+@app.get("/", response_class=HTMLResponse)
+def index():
+    return _page_file("index")
+
+
+# ── stats & control ───────────────────────────────────────────────────────────
 
 @app.get("/api/stats")
-async def api_stats():
+def api_stats():
     data = _load_stats()
     reg  = _load_registry()
     ctl  = _load_control()
@@ -399,14 +496,13 @@ async def api_stats():
         entry["is_pure_seeder"]   = dl == 0
         if "mode" not in entry:
             entry["mode"] = "seed" if dl == 0 else "down"
-        meta = reg.get(k)
+        meta = datastore.registry_meta(reg, k)
         if isinstance(meta, dict):
             entry["name"]     = meta.get("name", "")
             entry["has_udp"]  = bool(meta.get("udp_trackers"))
-        entry["paused"]   = k in paused_set
-        entry["tags"]     = ctl["tags"].get(k, [])
-        entry["override"] = ctl["overrides"].get(k, {})
-        entry["client"]   = entry.get("profile", "")
+        entry["paused"]   = datastore.alias_key(paused_set, k) is not None
+        entry["tags"]     = _ctl_get(ctl["tags"], k, [])
+        entry["override"] = _ctl_get(ctl["overrides"], k, {})
         entry.pop("peer_id", None)
         entry.pop("key", None)
         result[k] = entry
@@ -414,10 +510,9 @@ async def api_stats():
 
 
 @app.get("/api/registry")
-async def api_registry():
-    reg = _load_registry()
+def api_registry():
     out = {}
-    for k, v in reg.items():
+    for k, v in _load_registry().items():
         if not isinstance(v, dict):
             continue
         out[k] = {
@@ -430,11 +525,10 @@ async def api_registry():
 
 
 @app.get("/api/udp_status")
-async def api_udp_status():
-    reg = _load_registry()
+def api_udp_status():
     domains = {}
     affected = []
-    for ih, meta in reg.items():
+    for ih, meta in _load_registry().items():
         if not isinstance(meta, dict):
             continue
         udp = meta.get("udp_trackers", [])
@@ -442,10 +536,7 @@ async def api_udp_status():
             continue
         affected.append({"hash": ih, "name": meta.get("name", ""), "count": len(udp)})
         for url in udp:
-            try:
-                d = url.split("://", 1)[-1].split("/")[0].split(":")[0]
-            except Exception:
-                d = url
+            d = (urllib.parse.urlsplit(url).hostname or url)[:255]
             domains[d] = domains.get(d, 0) + 1
     return {
         "udp_detected":   bool(domains),
@@ -457,33 +548,33 @@ async def api_udp_status():
 
 
 @app.get("/api/control")
-async def api_control_get():
+def api_control_get():
     return _load_control()
 
 
 @app.post("/api/control/pause")
-async def api_control_pause(payload: dict = Body(...)):
-    ih = str(payload.get("hash", ""))[:8].lower()
+def api_control_pause(payload: dict = Body(...)):
+    ih = _hash_param(payload.get("hash"))
     if not VALID_HASH_RE.match(ih):
         return JSONResponse({"error": "invalid hash"}, status_code=400)
     paused = bool(payload.get("paused", True))
-    ctl = _load_control()
-    current = set(ctl["paused"])
-    current.add(ih) if paused else current.discard(ih)
-    ctl["paused"] = sorted(current)
-    if not _save_control(ctl):
-        return JSONResponse({"error": "could not write control file"}, status_code=500)
-    return {"hash": ih, "paused": paused}
+
+    def apply(ctl):
+        _drop_alias(ctl["paused"], ih)
+        current = set(ctl["paused"])
+        current.add(ih) if paused else current.discard(ih)
+        ctl["paused"] = sorted(current)
+    _, err = _edit_control(apply)
+    return err or {"hash": ih, "paused": paused}
 
 
 @app.post("/api/control/override")
-async def api_control_override(payload: dict = Body(...)):
-    ih = str(payload.get("hash", ""))[:8].lower()
+def api_control_override(payload: dict = Body(...)):
+    ih = _hash_param(payload.get("hash"))
     if not VALID_HASH_RE.match(ih):
         return JSONResponse({"error": "invalid hash"}, status_code=400)
-    ctl = _load_control()
-    entry = dict(ctl["overrides"].get(ih, {}))
-    for field, lo, hi in (("target_ratio", 0.0, 100.0), ("cumul_rep_ul", 0.0, 1e15)):
+    entry = {}
+    for field, lo, hi in (("target_ratio", 0.01, 100.0), ("cumul_rep_ul", 0.0, 1e15)):
         if field in payload and payload[field] is not None:
             try:
                 val = float(payload[field])
@@ -492,51 +583,88 @@ async def api_control_override(payload: dict = Body(...)):
             if not (lo <= val <= hi):
                 return JSONResponse({"error": f"{field} out of range"}, status_code=400)
             entry[field] = val
-    if payload.get("clear"):
-        ctl["overrides"].pop(ih, None)
-    elif entry:
-        ctl["overrides"][ih] = entry
-    if not _save_control(ctl):
-        return JSONResponse({"error": "could not write control file"}, status_code=500)
-    return {"hash": ih, "override": ctl["overrides"].get(ih, {})}
+
+    def apply(ctl):
+        legacy = _drop_alias(ctl["overrides"], ih) or {}
+        if payload.get("clear"):
+            ctl["overrides"].pop(ih, None)
+        elif entry:
+            ctl["overrides"][ih] = {**legacy, **ctl["overrides"].get(ih, {}), **entry}
+        elif legacy:
+            ctl["overrides"][ih] = legacy
+        return ctl["overrides"].get(ih, {})
+    result, err = _edit_control(apply)
+    return err or {"hash": ih, "override": result}
 
 
 @app.post("/api/control/tags")
-async def api_control_tags(payload: dict = Body(...)):
-    ih = str(payload.get("hash", ""))[:8].lower()
+def api_control_tags(payload: dict = Body(...)):
+    ih = _hash_param(payload.get("hash"))
     if not VALID_HASH_RE.match(ih):
         return JSONResponse({"error": "invalid hash"}, status_code=400)
     raw = payload.get("tags", [])
     if isinstance(raw, str):
-        raw = [t for t in raw.split(",")]
-    tags = sorted({re.sub(r"[^\w\- ]", "", str(t)).strip()[:32] for t in raw if str(t).strip()})
-    ctl = _load_control()
-    if tags:
-        ctl["tags"][ih] = tags
-    else:
-        ctl["tags"].pop(ih, None)
-    if not _save_control(ctl):
-        return JSONResponse({"error": "could not write control file"}, status_code=500)
-    return {"hash": ih, "tags": tags}
+        raw = raw.split(",")
+    tags = sorted({re.sub(r"[^\w\- ]", "", str(t)).strip()[:32] for t in raw if str(t).strip()} - {""})
+
+    def apply(ctl):
+        _drop_alias(ctl["tags"], ih)
+        if tags:
+            ctl["tags"][ih] = tags
+        else:
+            ctl["tags"].pop(ih, None)
+    _, err = _edit_control(apply)
+    return err or {"hash": ih, "tags": tags}
+
+
+# ── update ────────────────────────────────────────────────────────────────────
+
+_release_cache = {}
+
+
+def _channel():
+    return cs.get(_config(), "update", "update_channel")
 
 
 @app.get("/api/update/status")
-async def api_update_status():
+def api_update_status():
     st = updater.status()
     st["current"] = VERSION
     st["restart_pending"] = updater.RESTART_FLAG.exists()
+    st["docker"] = datastore.IN_DOCKER
+    st["channel"] = _channel()
+    if datastore.IN_DOCKER:
+        st["docker_note"] = updater.DOCKER_MESSAGE
     return st
 
 
+@app.get("/api/update/release")
+def api_update_release():
+    channel = _channel()
+    cached = _release_cache.get(channel)
+    if cached and time.monotonic() - cached[0] < 600:
+        return cached[1]
+    try:
+        info = updater.release_info(channel)
+        info["channel"] = channel
+        info["update_available"] = parse_version(info["tag"]) > parse_version(VERSION)
+    except Exception as e:
+        return JSONResponse({"error": f"could not reach GitHub: {e}"}, status_code=502)
+    _release_cache[channel] = (time.monotonic(), info)
+    return info
+
+
 @app.post("/api/update/start")
-async def api_update_start(payload: dict = Body(default={})):
-    ok, msg = updater.start(force=bool(payload.get("force")))
+def api_update_start(payload: dict = Body(default={})):
+    ok, msg = updater.start(force=bool(payload.get("force")), channel=_channel())
     return JSONResponse({"started": ok, "message": msg},
                         status_code=200 if ok else 409)
 
 
 @app.post("/api/update/rollback")
-async def api_update_rollback():
+def api_update_rollback():
+    if datastore.IN_DOCKER:
+        return JSONResponse({"error": updater.DOCKER_MESSAGE}, status_code=409)
     try:
         n = updater.rollback()
     except Exception as e:
@@ -562,10 +690,10 @@ def _exit_after_flush(flag: pathlib.Path):
 
 
 @app.post("/api/restart")
-async def api_restart():
-    flag = BASE_DIR / ".shutdown"
+def api_restart():
+    flag = datastore.SHUTDOWN_FLAG
     try:
-        atomic_write_json(flag, {"ts": int(time.time()), "reason": "restart"})
+        atomic_write_bytes(flag, json.dumps({"ts": int(time.time()), "reason": "restart"}).encode())
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
     threading.Thread(target=_exit_after_flush, args=(flag,), daemon=True).start()
@@ -573,9 +701,8 @@ async def api_restart():
             "note": "the service manager brings NewGreedy back up automatically"}
 
 
-
 @app.get("/api/profiles")
-async def api_profiles():
+def api_profiles():
     out = {}
     for name in client_profiles.profile_names():
         p = client_profiles.PROFILES[name]
@@ -588,99 +715,202 @@ async def api_profiles():
     return out
 
 
+# ── backup & restore ──────────────────────────────────────────────────────────
+
+RESTORABLE = {"config.ini", "stats.json", "torrent_registry.json", "control.json", "trash.json"}
+
+
+def _zip_response(data: bytes, filename: str):
+    return StreamingResponse(iter([data]), media_type="application/zip",
+                             headers={"Content-Disposition": f"attachment; filename={filename}"})
+
+
+def _restore_archive(data: bytes):
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile:
+        return JSONResponse({"error": "not a valid zip archive"}, status_code=400)
+    files = {}
+    with zf:
+        for name in zf.namelist():
+            base = pathlib.PurePosixPath(name).name
+            if base in RESTORABLE and base == name:
+                info = zf.getinfo(name)
+                if info.file_size > 50 * 1024 * 1024:
+                    return JSONResponse({"error": f"{name} is too large"}, status_code=400)
+                files[base] = zf.read(name)
+    if not files:
+        return JSONResponse({"error": "archive contained no known file"}, status_code=400)
+    parsed = {}
+    for name, blob in files.items():
+        if name.endswith(".json"):
+            try:
+                parsed[name] = json.loads(blob.decode("utf-8"))
+            except Exception:
+                return JSONResponse({"error": f"{name} is not valid JSON"}, status_code=400)
+            if not isinstance(parsed[name], dict):
+                return JSONResponse({"error": f"{name} has an unexpected format"}, status_code=400)
+    try:
+        backups.create("pre-restore")
+    except Exception as e:
+        logger.warning("[BACKUP] could not save the current data before restoring: %s", e)
+    restored = []
+    try:
+        for name, blob in files.items():
+            atomic_write_bytes(datastore.DATA_DIR / name, blob)
+            restored.append(name)
+        if "stats.json" in parsed:
+            raw = parsed["stats.json"]
+            datastore.queue_stats_import({k: v for k, v in raw.items() if not k.startswith("_")},
+                                         "replace", {"_tracker_cumul": raw.get("_tracker_cumul", {})})
+    except Exception as e:
+        return JSONResponse({"error": str(e), "restored": restored}, status_code=500)
+    _invalidate_cache()
+    if "config.ini" in restored:
+        set_config(cs.load(CONFIG_FILE))
+    logger.info("[RESTORE] %s restored from a backup archive", ", ".join(sorted(restored)))
+    return {"restored": sorted(restored),
+            "note": "applied by the running engine within a few seconds; a restart is only "
+                    "needed for ports, bind addresses and the client identity"}
+
+
 @app.get("/api/backup")
-async def api_backup():
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        for path in (CONFIG_FILE, STATS_FILE, REGISTRY_FILE, CONTROL_FILE):
-            if path.exists():
-                z.write(path, path.name)
-    buf.seek(0)
+def api_backup():
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    return StreamingResponse(
-        iter([buf.getvalue()]),
-        media_type="application/zip",
-        headers={"Content-Disposition": f"attachment; filename=newgreedy-backup-{stamp}.zip"},
-    )
+    return _zip_response(backups.build_archive(), f"newgreedy-backup-{stamp}.zip")
 
 
 @app.post("/api/restore")
 async def api_restore(file: UploadFile = File(...)):
-    data = await file.read(MAX_UPLOAD_SIZE + 1)
-    if len(data) > MAX_UPLOAD_SIZE:
+    data = await file.read(MAX_UPLOAD_SIZE * 5 + 1)
+    if len(data) > MAX_UPLOAD_SIZE * 5:
         return JSONResponse({"error": "archive too large"}, status_code=413)
-    allowed = {"config.ini", "stats.json", "torrent_registry.json", "control.json"}
-    restored = []
+    return await asyncio.to_thread(_restore_archive, data)
+
+
+@app.get("/api/backups")
+def api_backups_list():
+    c = _config()
+    return {"backups": backups.listing(), "auto": cs.get(c, "backup", "auto_backup"),
+            "interval_hours": cs.get(c, "backup", "backup_interval_hours"),
+            "keep": cs.get(c, "backup", "backup_keep"), "folder": str(datastore.BACKUPS_DIR)}
+
+
+@app.post("/api/backups")
+def api_backups_create():
     try:
-        with zipfile.ZipFile(io.BytesIO(data)) as z:
-            for name in z.namelist():
-                base = pathlib.PurePosixPath(name).name
-                if base not in allowed or base != name:
-                    continue
-                atomic_write_bytes(BASE_DIR / base, z.read(name))
-                restored.append(base)
-    except zipfile.BadZipFile:
-        return JSONResponse({"error": "not a valid zip archive"}, status_code=400)
+        return {"created": backups.create("manual")}
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
-    if not restored:
-        return JSONResponse({"error": "archive contained no known file"}, status_code=400)
-    _invalidate_cache()
-    if _cfg and "config.ini" in restored:
-        _cfg.read(CONFIG_FILE)
-    return {"restored": restored, "note": "restart NewGreedy to apply engine settings"}
 
+
+@app.get("/api/backups/{name}")
+def api_backups_get(name: str):
+    try:
+        path = backups.path_of(name)
+    except (ValueError, FileNotFoundError):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return _zip_response(path.read_bytes(), name)
+
+
+@app.post("/api/backups/{name}/restore")
+def api_backups_restore(name: str):
+    try:
+        data = backups.path_of(name).read_bytes()
+    except (ValueError, FileNotFoundError):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return _restore_archive(data)
+
+
+@app.delete("/api/backups/{name}")
+def api_backups_delete(name: str):
+    try:
+        backups.delete(name)
+    except (ValueError, FileNotFoundError):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return {"deleted": name}
+
+
+# ── status, diagnostics, notifications ────────────────────────────────────────
+
+@app.get("/api/status")
+def api_status():
+    c = _config()
+    checks = diagnostics.run(c, live=True)
+    engine = datastore.read_status()
+    trash = datastore.trash_list()
+    return {
+        "version": VERSION, "summary": diagnostics.summary(checks), "checks": checks,
+        "engine": engine, "docker": datastore.IN_DOCKER, "data_dir": str(datastore.DATA_DIR),
+        "proxy": {"host": cs.get(c, "proxy", "listen_host"), "port": cs.get(c, "proxy", "listen_port")},
+        "files": {
+            "stats_json": datastore.file_size(STATS_FILE),
+            "trash_json": datastore.file_size(datastore.TRASH_FILE),
+            "log": datastore.file_size(LOG_FILE),
+            "trash_entries": len(trash),
+            "backups": len(backups.listing()),
+            "history_max_points": cs.get(c, "stats", "history_max_points"),
+            "history_retention_days": cs.get(c, "stats", "history_retention_days"),
+        },
+    }
+
+
+@app.post("/api/notify/test")
+def api_notify_test():
+    _config()
+    ok, detail = notify_test()
+    return JSONResponse({"ok": ok, "detail": detail}, status_code=200 if ok else 502)
 
 
 @app.get("/api/tracker_stats")
-async def api_tracker_stats():
-    tc = _load_tracker_cumul()
-    cfg_max = 2.5
-    if _cfg:
-        try:
-            cfg_max = float(_cfg.get("spoofing", "max_global_ratio_per_tracker", fallback="2.5"))
-        except Exception:
-            pass
+def api_tracker_stats():
+    c = _config()
     result = {}
-    for domain, vals in tc.items():
+    for domain, vals in _load_tracker_cumul().items():
         if not isinstance(vals, dict):
             continue
         ul = float(vals.get("ul", 0))
         dl = float(vals.get("dl", 0))
         ratio = round(ul / dl, 4) if dl > 0 else None
+        cap = _tracker_cap(c, domain)
         result[domain] = {
             "ul_mb":      round(ul / 1e6, 2),
             "dl_mb":      round(dl / 1e6, 2),
             "ratio":      ratio,
-            "cap":        cfg_max,
-            "pct_of_cap": round((ratio / cfg_max) * 100, 1) if ratio is not None else None,
+            "cap":        cap,
+            "pct_of_cap": round((ratio / cap) * 100, 1) if ratio is not None and cap else None,
             "last_seen":  vals.get("ts", 0),
         }
     return result
 
 
-def _max_torrent_ratio() -> float:
-    if not _cfg:
-        return 3.0
-    try:
-        return float(_cfg.get("spoofing", "max_ratio_per_torrent", fallback="3.0"))
-    except Exception:
-        return 3.0
-
-
 @app.get("/api/health")
-async def api_health():
-    data      = _load_stats()
-    stalled   = [ih for ih, d in data.items() if d.get("stalled", False)]
-    anomalies = [ih for ih, d in data.items()
-                 if d.get("cumul_rep_dl", 0) > 0
-                 and d.get("cumul_rep_ul", 0) / d["cumul_rep_dl"] > _max_torrent_ratio()]
-    reached   = [ih for ih, d in data.items() if d.get("target_reached", False)]
-    return {"total": len(data), "stalled": stalled, "anomalies": anomalies, "target_reached": reached}
+def api_health(request: Request):
+    engine = datastore.read_status()
+    age = time.time() - float(engine.get("heartbeat", 0) or 0)
+    running = engine.get("state") == "running" and age < diagnostics.HEARTBEAT_STALE_S
+    out = {"status": "ok" if running else "degraded", "version": VERSION,
+           "engine": engine.get("state", "unknown")}
+    if _token_ok(request):
+        data = _load_stats()
+        cap = cs.get(_config(), "spoofing", "max_ratio_per_torrent")
+        out.update({
+            "total": len(data),
+            "stalled": [ih for ih, d in data.items() if d.get("stalled", False)],
+            "anomalies": [ih for ih, d in data.items()
+                          if d.get("cumul_rep_dl", 0) > 0
+                          and d.get("cumul_rep_ul", 0) / d["cumul_rep_dl"] > cap],
+            "target_reached": [ih for ih, d in data.items() if d.get("target_reached", False)],
+        })
+    return JSONResponse(out, status_code=200 if running or not engine else 503)
+
+
+def _label(v) -> str:
+    return str(v).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
 @app.get("/metrics", response_class=PlainTextResponse)
-async def api_metrics():
+def api_metrics():
     data = _load_stats()
     tc   = _load_tracker_cumul()
     lines = [
@@ -691,13 +921,13 @@ async def api_metrics():
         "# TYPE newgreedy_upload_bytes_total gauge",
     ]
     for ih, d in data.items():
-        lines.append(f'newgreedy_upload_bytes_total{{hash="{ih}"}} {int(d.get("cumul_rep_ul", 0))}')
+        lines.append(f'newgreedy_upload_bytes_total{{hash="{_label(ih)}"}} {int(d.get("cumul_rep_ul", 0))}')
     lines += [
         "# HELP newgreedy_download_bytes_total Cumulative download per torrent",
         "# TYPE newgreedy_download_bytes_total gauge",
     ]
     for ih, d in data.items():
-        lines.append(f'newgreedy_download_bytes_total{{hash="{ih}"}} {int(d.get("cumul_rep_dl", 0))}')
+        lines.append(f'newgreedy_download_bytes_total{{hash="{_label(ih)}"}} {int(d.get("cumul_rep_dl", 0))}')
     lines += [
         "# HELP newgreedy_torrent_ratio Current ratio per torrent",
         "# TYPE newgreedy_torrent_ratio gauge",
@@ -705,13 +935,13 @@ async def api_metrics():
     for ih, d in data.items():
         dl = d.get("cumul_rep_dl", 0)
         r  = (d.get("cumul_rep_ul", 0) / dl) if dl > 0 else 0
-        lines.append(f'newgreedy_torrent_ratio{{hash="{ih}"}} {r:.4f}')
+        lines.append(f'newgreedy_torrent_ratio{{hash="{_label(ih)}"}} {r:.4f}')
     lines += [
         "# HELP newgreedy_announces_total Announce count per torrent",
         "# TYPE newgreedy_announces_total counter",
     ]
     for ih, d in data.items():
-        lines.append(f'newgreedy_announces_total{{hash="{ih}"}} {int(d.get("ann_count", 0))}')
+        lines.append(f'newgreedy_announces_total{{hash="{_label(ih)}"}} {int(d.get("ann_count", 0))}')
     lines += [
         "# HELP newgreedy_tracker_ratio Aggregate ratio per tracker domain",
         "# TYPE newgreedy_tracker_ratio gauge",
@@ -721,7 +951,10 @@ async def api_metrics():
             continue
         dl = float(v.get("dl", 0))
         r  = (float(v.get("ul", 0)) / dl) if dl > 0 else 0
-        lines.append(f'newgreedy_tracker_ratio{{domain="{domain}"}} {r:.4f}')
+        lines.append(f'newgreedy_tracker_ratio{{domain="{_label(domain)}"}} {r:.4f}')
+    engine = datastore.read_status()
+    up = 1 if engine.get("state") == "running" and \
+        time.time() - float(engine.get("heartbeat", 0) or 0) < diagnostics.HEARTBEAT_STALE_S else 0
     lines += [
         "# HELP newgreedy_stalled_total Torrents flagged as stalled",
         "# TYPE newgreedy_stalled_total gauge",
@@ -729,19 +962,21 @@ async def api_metrics():
         "# HELP newgreedy_target_reached_total Torrents that reached their target ratio",
         "# TYPE newgreedy_target_reached_total gauge",
         f'newgreedy_target_reached_total {sum(1 for d in data.values() if d.get("target_reached"))}',
+        "# HELP newgreedy_engine_up 1 when the mitmproxy engine reports a recent heartbeat",
+        "# TYPE newgreedy_engine_up gauge",
+        f"newgreedy_engine_up {up}",
     ]
     return "\n".join(lines) + "\n"
 
 
 @app.get("/api/history")
-async def api_history():
-    data = _load_stats()
-    return {k: v.get("history", []) for k, v in data.items()}
+def api_history():
+    return {k: v.get("history", []) for k, v in _load_stats().items()}
 
 
 @app.get("/api/history/{ih}")
-async def api_history_single(ih: str):
-    ih = ih[:8].lower()
+def api_history_single(ih: str):
+    ih = _hash_param(ih)
     data = _load_stats()
     if ih not in data:
         return JSONResponse({"error": "not found"}, status_code=404)
@@ -749,7 +984,7 @@ async def api_history_single(ih: str):
 
 
 @app.delete("/api/logs")
-async def api_logs_clear():
+def api_logs_clear():
     try:
         ng = logging.getLogger("NewGreedy")
         for h in list(ng.handlers):
@@ -773,31 +1008,55 @@ async def api_logs_clear():
 
 
 @app.get("/api/logs")
-async def api_logs(lines: int = Query(default=100, ge=10, le=2000)):
+def api_logs(lines: int = Query(default=100, ge=10, le=2000)):
     return {"lines": _tail_log(lines)}
 
 
+# ── config ────────────────────────────────────────────────────────────────────
+
+def _mask_url(url: str, hide_path: bool) -> str:
+    """URL without its secrets: password, and for webhooks the path and query."""
+    try:
+        p = urllib.parse.urlsplit(url)
+    except ValueError:
+        return MASK
+    if not p.scheme or not p.netloc:
+        return MASK if url else url
+    userinfo, sep, host = p.netloc.rpartition("@")
+    if sep:
+        user, colon, _ = userinfo.partition(":")
+        host = f"{user}{':' + MASK if colon else ''}@{host}"
+    path, query = p.path, p.query
+    if hide_path and (path.strip("/") or query):
+        path, query = "/" + MASK, ""
+    return urllib.parse.urlunsplit((p.scheme, host, path, query, ""))
+
+
 @app.get("/api/config")
-async def api_config():
-    if _cfg is None:
+def api_config():
+    c = _config()
+    if c is None:
         return {}
     out = {}
-    for s in _cfg.sections():
-        out[s] = dict(_cfg[s])
-    if "web" in out:
-        out["web"] = dict(out["web"])
-        if out["web"].get("web_secret_token"):
-            out["web"]["web_secret_token"] = "***"
+    for s in c.sections():
+        out[s] = dict(c[s])
+    for section, key in cs.SECRET_KEYS:
+        if out.get(section, {}).get(key):
+            out[section] = dict(out[section], **{key: MASK})
+    for (section, key), hide_path in MASKED_URLS.items():
+        if out.get(section, {}).get(key):
+            out[section] = dict(out[section], **{key: _mask_url(out[section][key], hide_path)})
     return out
 
 
 @app.get("/api/config/editable")
-async def api_config_editable():
-    return {"keys": sorted([f"{s}.{k}" for s, k in EDITABLE_KEYS])}
+def api_config_editable():
+    return {"keys": sorted([f"{s}.{k}" for s, k in EDITABLE_KEYS]),
+            "restart": sorted([f"{s}.{k}" for s, k in cs.RESTART_KEYS if (s, k) in EDITABLE_KEYS])}
 
 
 @app.post("/api/config/set")
-async def api_config_set(payload: dict = Body(...)):
+def api_config_set(payload: dict = Body(...)):
     section = str(payload.get("section", "")).strip()
     key     = str(payload.get("key", "")).strip()
     value   = payload.get("value", "")
@@ -806,72 +1065,67 @@ async def api_config_set(payload: dict = Body(...)):
     value = str(value).strip()
     if "\n" in value or "\r" in value:
         return JSONResponse({"error": "invalid value"}, status_code=400)
-    problem = _validate_value(key, value)
+    if (section, key) in MASKED_URLS and MASK in value:
+        current = cs.get(_config(), section, key) or ""
+        if value == _mask_url(current, MASKED_URLS[(section, key)]):
+            return {"status": "ok", "section": section, "key": key, "value": value,
+                    "restart_required": False, "note": "unchanged"}
+        return JSONResponse({"error": f"{key} is shown masked - type the full URL to change it"},
+                            status_code=400)
+    problem = cs.validate_value(section, key, value)
     if problem:
         return JSONResponse({"error": problem}, status_code=400)
+    value = cs.normalize(section, key, value)
     try:
-        lines = CONFIG_FILE.read_text(encoding="utf-8").splitlines()
+        cs.set_value(CONFIG_FILE, section, key, value)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
-    cur_section = None
-    updated = False
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
-            cur_section = stripped[1:-1]
-            continue
-        if cur_section != section or "=" not in line or stripped.startswith((";", "#")):
-            continue
-        lhs = line.split("=", 1)[0]
-        if lhs.strip() != key:
-            continue
-        lines[i] = f"{lhs}= {value}" if lhs.endswith(" ") else f"{lhs} = {value}"
-        updated = True
-        break
-    if not updated:
-        return JSONResponse({"error": f"{section}.{key} not found in config.ini"}, status_code=404)
-    try:
-        CONFIG_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-    if _cfg:
-        _cfg.read(CONFIG_FILE)
+    set_config(cs.load(CONFIG_FILE))
+    restart = (section, key) in cs.RESTART_KEYS
     return {"status": "ok", "section": section, "key": key, "value": value,
-            "note": "restart required for listen_port / web_port changes"}
+            "restart_required": restart,
+            "note": "restart NewGreedy to apply this one" if restart
+                    else "applied by the running engine within 5 seconds"}
 
 
 @app.post("/api/config/reload")
-async def api_config_reload():
-    if _cfg:
-        _cfg.read(CONFIG_FILE)
-    return {"status": "reloaded"}
+def api_config_reload():
+    set_config(cs.load(CONFIG_FILE))
+    try:
+        os.utime(CONFIG_FILE, None)
+    except OSError:
+        pass
+    return {"status": "reloaded", "note": "the engine applies it within 5 seconds"}
 
 
-_version_cache    = None
-_version_cache_ts = 0.0
+_version_cache    = {}
 VERSION_TTL_OK    = 3600
 VERSION_TTL_ERR   = 300
 
 
 @app.get("/api/version")
-async def api_version():
-    global _version_cache, _version_cache_ts
+def api_version():
+    channel = _channel()
     now = time.monotonic()
-    if _version_cache is not None:
-        ttl = VERSION_TTL_ERR if _version_cache.get("error") else VERSION_TTL_OK
-        if (now - _version_cache_ts) < ttl:
-            return dict(_version_cache, cached=True)
+    cached = _version_cache.get(channel)
+    if cached is not None:
+        result, ts = cached
+        ttl = VERSION_TTL_ERR if result.get("error") else VERSION_TTL_OK
+        if (now - ts) < ttl:
+            return dict(result, cached=True)
     try:
-        data = fetch_latest()
-        latest = data.get("tag_name", "unknown")
+        info = updater.release_info(channel)
+        latest = info["tag"] or "unknown"
         up_to_date = (parse_version(latest) <= parse_version(VERSION))
         result = {
             "current":          VERSION,
             "latest":           latest,
+            "channel":          channel,
             "up_to_date":       up_to_date,
             "update_available": not up_to_date,
-            "release_url":      data.get("html_url", ""),
-            "url":              data.get("html_url", ""),
+            "release_url":      info["url"],
+            "url":              info["url"],
+            "docker":           datastore.IN_DOCKER,
         }
     except Exception as e:
         reason = str(e)
@@ -879,34 +1133,38 @@ async def api_version():
             reason = "GitHub API rate limit reached (60 requests/hour per IP) - retry later"
         elif "Name or service not known" in reason or "Temporary failure" in reason:
             reason = "No network access to api.github.com"
-        result = {"current": VERSION, "latest": None, "up_to_date": None,
+        result = {"current": VERSION, "latest": None, "up_to_date": None, "channel": channel,
                   "update_available": False, "error": reason}
-    _version_cache    = result
-    _version_cache_ts = now
+    _version_cache[channel] = (result, now)
     return dict(result, cached=False)
 
 
 @app.get("/api/stats/csv")
-async def api_stats_csv():
+def api_stats_csv():
     data = _load_stats()
-    rows = ["hash,mode,dl_mb,ul_mb,delta_ul_mb,ratio,size_mb,ann_count,stalled,target_reached"]
+    reg = _load_registry()
+    rows = ["hash,name,mode,dl_mb,ul_mb,real_ul_mb,ratio,size_mb,ann_count,stalled,target_reached"]
     for ih, d in data.items():
         ul    = d.get("cumul_rep_ul", 0) / 1e6
         dl    = d.get("cumul_rep_dl", 0) / 1e6
         size  = (d.get("size_bytes", 0) or (dl * 1e6) or d.get("seed_fake_dl", 0)) / 1e6
         ratio = round(ul / dl, 4) if dl > 0 else ""
-        mode  = "SEED" if dl == 0 else "DOWN"
+        mode  = str(d.get("mode") or ("seed" if dl == 0 else "down")).upper()
+        meta  = datastore.registry_meta(reg, ih)
+        name  = (meta.get("name", "") if isinstance(meta, dict) else "").replace('"', '""')
         rows.append(
-            f"{ih},{mode},{dl:.2f},{ul:.2f},,{ratio},{size:.2f},"
-            f"{d.get('ann_count',0)},{d.get('stalled',False)},{d.get('target_reached',False)}"
+            f'{ih},"{name}",{mode},{dl:.2f},{ul:.2f},{d.get("cumul_real_ul", 0) / 1e6:.2f},'
+            f"{ratio},{size:.2f},{d.get('ann_count', 0)},{d.get('stalled', False)},"
+            f"{d.get('target_reached', False)}"
         )
-    content = "\n".join(rows)
     return StreamingResponse(
-        iter([content]),
+        iter(["\n".join(rows) + "\n"]),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=newgreedy_stats.csv"},
     )
 
+
+# ── torrents ──────────────────────────────────────────────────────────────────
 
 def _register_torrent(data: bytes, filename: str):
     ih, size = torrent_info(data)
@@ -914,16 +1172,16 @@ def _register_torrent(data: bytes, filename: str):
         raise ValueError("Could not extract info_hash")
     trackers = tracker_urls(data)
     udp = [u for u in trackers if u.lower().startswith("udp://")]
-    ih_key = ih[:8]
-    reg = _load_registry()
-    reg[ih_key] = {
-        "info_hash":    ih,
-        "size_bytes":   size,
-        "name":         _sanitize_filename(filename),
-        "trackers":     trackers,
-        "udp_trackers": udp,
-    }
-    _save_registry(reg)
+    ih_key = ih
+    name = _sanitize_filename(filename) or _sanitize_filename(torrent_name(data)) or ih[:8]
+
+    def put(reg):
+        legacy = reg.get(ih[:8])
+        if isinstance(legacy, dict) and legacy.get("info_hash") in (None, "", ih):
+            del reg[ih[:8]]
+        reg[ih_key] = {"info_hash": ih, "size_bytes": size, "name": name,
+                       "trackers": trackers, "udp_trackers": udp}
+    datastore.update_json(REGISTRY_FILE, put, {})
     return ih, ih_key, size, udp
 
 
@@ -937,12 +1195,12 @@ async def api_upload_torrent(file: UploadFile = File(...)):
                 status_code=413,
             )
         try:
-            ih, ih_key, size, udp = _register_torrent(data, file.filename or "")
-        except (ValueError, IndexError) as e:
+            ih, ih_key, size, udp = await asyncio.to_thread(_register_torrent, data, file.filename or "")
+        except (ValueError, IndexError, RecursionError) as e:
             return JSONResponse({"error": f"not a readable .torrent file ({e})"}, status_code=400)
         return {
             "info_hash":       ih,
-            "info_hash_short": ih_key,
+            "info_hash_short": ih[:8],
             "size_bytes":      size,
             "size_mb":         round(size / 1e6, 2),
             "infohash":        ih,
@@ -969,94 +1227,156 @@ def _select_for_purge(data, keep_active, inactive_hours):
     return out
 
 
-def _read_stats_raw():
-    try:
-        with open(STATS_FILE, encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
+def _remove_stats(hashes, reason):
+    """Drop entries from stats.json, keep them in the trash, and tell the engine."""
+    with datastore.file_lock(STATS_FILE):
+        # a private copy: other requests may be reading the cached one
+        data = datastore.read_json(STATS_FILE, {})
+        data = data if isinstance(data, dict) else {}
+        removed = {k: data.pop(k) for k in hashes if k in data}
+        if removed:
+            # queued before the lock is released: the engine applies it before its next save
+            datastore.queue_purge(list(removed))
+            datastore.atomic_write_json(STATS_FILE, data)
+    if removed and cs.get(_config(), "stats", "trash_retention_days") > 0:
+        datastore.trash_add(removed, reason)
+    _invalidate_cache()
+    return removed, len([k for k in data if VALID_HASH_RE.match(k)])
 
 
 @app.get("/api/stats/purge")
-async def purge_stats_preview(keep_active: bool = True, inactive_hours: int = 0):
+def purge_stats_preview(keep_active: bool = True, inactive_hours: int = 0):
     to_del = _select_for_purge(_read_stats_file(), keep_active, inactive_hours)
     return {"would_purge": len(to_del), "hashes": to_del,
             "keep_active": keep_active, "inactive_hours": inactive_hours}
 
 
 @app.delete("/api/stats/purge")
-async def purge_stats(keep_active: bool = True, inactive_hours: int = 0):
-    data = _read_stats_raw()
-    before = len([k for k in data if VALID_HASH_RE.match(k)])
-    to_del = _select_for_purge(data, keep_active, inactive_hours)
-    for k in to_del:
-        del data[k]
+def purge_stats(keep_active: bool = True, inactive_hours: int = 0):
+    to_del = _select_for_purge(_read_stats_file(cached=False), keep_active, inactive_hours)
     try:
-        atomic_write_json(STATS_FILE, data)
+        removed, remaining = _remove_stats(to_del, "manual")
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
-    _write_purge_pending(to_del)
-    _invalidate_cache()
-    after = len([k for k in data if VALID_HASH_RE.match(k)])
-    return {"purged": before - after, "remaining": after,
+    return {"purged": len(removed), "remaining": remaining,
             "keep_active": keep_active, "inactive_hours": inactive_hours}
 
 
 @app.delete("/api/stats/{ih}")
-async def delete_torrent_stat(ih: str):
-    ih = ih[:8].lower()
+def delete_torrent_stat(ih: str):
+    ih = _hash_param(ih)
     if not VALID_HASH_RE.match(ih):
         return JSONResponse({"error": "invalid hash"}, status_code=400)
-    data = _read_stats_raw()
-    if ih not in data:
-        return JSONResponse({"error": "not found"}, status_code=404)
-    del data[ih]
     try:
-        atomic_write_json(STATS_FILE, data)
+        removed, _ = _remove_stats([ih], "manual")
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
-    _write_purge_pending([ih])
-    _invalidate_cache()
+    if not removed:
+        return JSONResponse({"error": "not found"}, status_code=404)
     return {"deleted": ih}
+
+
+@app.get("/api/trash")
+def api_trash_list():
+    reg = _load_registry()
+    out = []
+    for ih, item in datastore.trash_list().items():
+        if not isinstance(item, dict):
+            continue
+        d = item.get("data") or {}
+        meta = datastore.registry_meta(reg, ih)
+        out.append({"hash": ih, "deleted_at": item.get("deleted_at", 0), "reason": item.get("reason", ""),
+                    "name": meta.get("name", "") if isinstance(meta, dict) else "",
+                    "cumul_rep_ul": d.get("cumul_rep_ul", 0), "cumul_rep_dl": d.get("cumul_rep_dl", 0),
+                    "ann_count": d.get("ann_count", 0)})
+    return {"items": sorted(out, key=lambda x: x["deleted_at"], reverse=True),
+            "retention_days": cs.get(_config(), "stats", "trash_retention_days")}
+
+
+@app.post("/api/trash/{ih}/restore")
+def api_trash_restore(ih: str):
+    ih = _hash_param(ih)
+    if not VALID_HASH_RE.match(ih):
+        return JSONResponse({"error": "invalid hash"}, status_code=400)
+    if ih in _read_stats_file(cached=False):
+        return JSONResponse({"error": "this torrent announced again since it was purged and "
+                                      "has a new entry - delete that entry first to bring the "
+                                      "old figures back"}, status_code=409)
+    item = datastore.trash_take(ih)
+    if not isinstance(item, dict) or not isinstance(item.get("data"), dict):
+        return JSONResponse({"error": "not in the trash"}, status_code=404)
+    datastore.queue_stats_import({ih: item["data"]}, "merge")
+    return {"restored": ih, "note": "back in the stats within a few seconds"}
+
+
+@app.delete("/api/trash/{ih}")
+def api_trash_delete(ih: str):
+    item = datastore.trash_take(_hash_param(ih))
+    if item is None:
+        return JSONResponse({"error": "not in the trash"}, status_code=404)
+    return {"deleted": _hash_param(ih)}
+
+
+@app.delete("/api/trash")
+def api_trash_empty():
+    n = datastore.update_json(datastore.TRASH_FILE, lambda cur: (len(cur), cur.clear())[0], {})
+    return {"deleted": n}
+
+
+# ── live logs ─────────────────────────────────────────────────────────────────
+
+def _log_size():
+    try:
+        return os.path.getsize(LOG_FILE)
+    except OSError:
+        return 0
+
+
+def _read_log_from(pos: int):
+    """Bytes appended to the log since pos: (rotated, data, new_pos)."""
+    try:
+        with open(LOG_FILE, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            rotated = size < pos
+            f.seek(0 if rotated else pos)
+            data = f.read()
+            return rotated, data, f.tell()
+    except FileNotFoundError:
+        return pos > 0, b"", 0
+
+
+async def _ws_send_lines(ws: WebSocket, lines):
+    for line in lines:
+        if line.strip():
+            await ws.send_text(line)
 
 
 @app.websocket("/ws/logs")
 async def ws_logs(ws: WebSocket):
-    if _SECRET_TOKEN:
-        supplied = ws.query_params.get("token") or ws.cookies.get(TOKEN_COOKIE) or ""
-        if not hmac.compare_digest(supplied, _SECRET_TOKEN):
-            await ws.close(code=1008)
-            return
+    if not _host_ok(ws) or not _origin_ok(ws) or not _token_ok(ws):
+        await ws.close(code=1008)
+        return
     await ws.accept()
-    for line in _tail_log(500):
-        if line.strip():
-            await ws.send_text(line)
-    try:
-        with open(LOG_FILE, "rb") as f:
-            f.seek(0, 2)
-            last_pos = f.tell()
-    except FileNotFoundError:
-        last_pos = 0
+    # file reads run in a thread: the event loop also serves the API
+    last_pos = await asyncio.to_thread(_log_size)
+    await _ws_send_lines(ws, await asyncio.to_thread(_tail_log, 500))
+    pending = b""
     try:
         while True:
             try:
-                with open(LOG_FILE, "rb") as f:
-                    f.seek(0, 2)
-                    size = f.tell()
-                    if size < last_pos:
-                        last_pos = 0
-                        await ws.send_text("--- log file truncated or rotated, resuming ---")
-                    f.seek(last_pos)
-                    chunk    = f.read()
-                    last_pos = f.tell()
-                if chunk:
-                    for line in chunk.decode("utf-8", errors="replace").splitlines():
-                        if line.strip():
-                            await ws.send_text(line)
+                rotated, data, last_pos = await asyncio.to_thread(_read_log_from, last_pos)
+                if rotated:
+                    pending = b""
+                    await ws.send_text("--- log file truncated or rotated, resuming ---")
+                data = pending + data
+                complete, sep, pending = data.rpartition(b"\n")
+                if sep:
+                    await _ws_send_lines(ws, complete.decode("utf-8", errors="replace").splitlines())
+                else:
+                    pending = data
             except (WebSocketDisconnect, RuntimeError):
                 break
-            except FileNotFoundError:
-                last_pos = 0
             except Exception as e:
                 logger.debug("ws_logs error: %s", e)
                 break
@@ -1065,41 +1385,45 @@ async def ws_logs(ws: WebSocket):
         pass
 
 
+# ── watch folder ──────────────────────────────────────────────────────────────
+
 _watch_seen = {}
 
 
 def _scan_watch_folder():
     if not _WATCH_FOLDER:
         return
-    folder = pathlib.Path(_WATCH_FOLDER)
-    if not folder.is_absolute():
-        folder = BASE_DIR / folder
+    folder = datastore.resolve_data_path(_WATCH_FOLDER)
     try:
         folder.mkdir(parents=True, exist_ok=True)
     except Exception:
         return
     present = set()
-    for path in folder.glob("*.torrent"):
+    for path in folder.iterdir():
+        if not path.is_file() or path.suffix.lower() != ".torrent":
+            continue
         present.add(str(path))
         try:
             stat = path.stat()
-            sig = (stat.st_mtime, stat.st_size)
-            if _watch_seen.get(str(path)) == sig:
-                continue
+        except OSError:
+            continue
+        sig = (stat.st_mtime, stat.st_size)
+        if _watch_seen.get(str(path)) == sig:
+            continue
+        _watch_seen[str(path)] = sig
+        try:
             if stat.st_size > MAX_UPLOAD_SIZE:
                 logger.warning("[WATCH] %s skipped - larger than %d MB",
                                path.name, MAX_UPLOAD_SIZE // (1024 * 1024))
-                _watch_seen[str(path)] = sig
                 continue
             data = path.read_bytes()
             ih, ih_key, size, udp = _register_torrent(data, path.name)
-            _watch_seen[str(path)] = sig
-            logger.info("[WATCH] imported %s -> %s (%.1f MB)", path.name, ih_key, size / 1e6)
+            logger.info("[WATCH] imported %s -> %s (%.1f MB)", path.name, ih_key[:8], size / 1e6)
             if udp:
                 logger.warning("[UDP_BYPASS] %s uses %d UDP tracker(s) - those announces bypass NewGreedy",
                                path.name, len(udp))
         except Exception as e:
-            logger.debug("[WATCH] %s error: %s", path.name, e)
+            logger.warning("[WATCH] %s not imported: %s", path.name, e)
     for gone in [k for k in _watch_seen if k not in present]:
         del _watch_seen[gone]
 
@@ -1107,18 +1431,23 @@ def _scan_watch_folder():
 async def _watch_loop():
     while True:
         try:
+            _config()
             await asyncio.to_thread(_scan_watch_folder)
         except Exception as e:
             logger.debug("watch loop error: %s", e)
         await asyncio.sleep(WATCH_INTERVAL)
 
 
+@app.get("/favicon.ico")
+def favicon():
+    return Response(status_code=204)
+
+
 @app.get("/{page}", response_class=HTMLResponse)
-async def serve_page(page: str):
-    valid = {"torrents", "charts", "config", "logs", "help"}
-    if page not in valid:
+def serve_page(page: str):
+    if page not in PAGES:
         return HTMLResponse(status_code=404, content="Not found")
-    f = STATIC_DIR / f"{page}.html"
-    if not f.exists():
+    if not (STATIC_DIR / f"{page}.html").exists():
         return HTMLResponse(status_code=404, content=f"{page}.html not found in static/")
-    return f.read_text(encoding="utf-8")
+    return _page_file(page)
+

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>NewGreedy — Charts</title>
-<link rel="stylesheet" href="/static/style.css?v=1.7.7">
+<link rel="stylesheet" href="/static/style.css?v=__NG_VERSION__">
 </head>
 <body>
 <nav>
@@ -15,6 +15,7 @@
     <a href="/charts"   data-page="charts">Charts</a>
     <a href="/config"   data-page="config">Config</a>
     <a href="/logs"     data-page="logs">Logs</a>
+    <a href="/status"   data-page="status">Status</a>
     <a href="/help"     data-page="help">Help</a>
   </div>
   <div class="nav-right">
@@ -52,7 +53,7 @@
 </div>
 
 </main>
-<script src="/static/app.js?v=1.7.7"></script>
+<script src="/static/app.js?v=__NG_VERSION__"></script>
 <script>
 if (typeof ngUrl !== 'function') {
   document.addEventListener('DOMContentLoaded', function () {
@@ -104,7 +105,7 @@ function buildPicker(){
   var box=document.getElementById('cmplist');
   box.innerHTML=Object.entries(_stats).map(([ih,d])=>
     '<label style="display:flex;align-items:center;gap:5px;cursor:pointer">'
-    +'<input type="checkbox" value="'+ih+'" onchange="pickChanged()"'+(_picked.indexOf(ih)>-1?' checked':'')+'>'
+    +'<input type="checkbox" value="'+esc(ih)+'" onchange="pickChanged()"'+(_picked.indexOf(ih)>-1?' checked':'')+'>'
     +'<span class="mono">'+fName(d,ih)+'</span></label>').join('');
 }
 function pickChanged(){
@@ -115,7 +116,7 @@ function drawCompare(){
   var area=document.getElementById('cmparea');
   if(!_picked.length){area.style.display='none';return;}
   area.style.display='';
-  Promise.all(_picked.map(ih=>API.get('/api/history/'+ih).catch(()=>[])))
+  Promise.all(_picked.map(ih=>API.get('/api/history/'+encodeURIComponent(ih)).catch(()=>[])))
   .then(all=>{
     var sets=[], maxLen=0;
     all.forEach((hist,i)=>{
@@ -123,7 +124,7 @@ function drawCompare(){
       maxLen=Math.max(maxLen,hist.length);
       var col=PALETTE[i%PALETTE.length];
       sets.push({
-        label:fName(_stats[_picked[i]]||{},_picked[i]),
+        label:fNameRaw(_stats[_picked[i]]||{},_picked[i]),
         data:hist.map(p=>p.dl>0?+(p.ul/p.dl).toFixed(3):0),
         borderColor:col,backgroundColor:col+'22',
         borderWidth:2,pointRadius:0,tension:.3,fill:false
@@ -147,7 +148,7 @@ function loadChart(){
   document.getElementById('nosel').style.display=ih?'none':'';
   document.getElementById('charea').style.display=ih?'':'none';
   if(!ih) return;
-  API.get('/api/history/'+ih).then(hist=>{
+  API.get('/api/history/'+encodeURIComponent(ih)).then(hist=>{
     if(!hist||!hist.length){
       document.getElementById('charea').style.display='none';
       document.getElementById('nosel').style.display='';
@@ -164,7 +165,7 @@ function loadChart(){
     var r=ratioNum(d);
     document.getElementById('infoline').innerHTML=
       '<span><b>Torrent</b>: <span class="mono">'+fName(d,ih)+'</span></span>'
-      +'<span><b>Hash</b>: <span class="mono">'+ih+'</span></span>'
+      +'<span><b>Hash</b>: <span class="mono">'+esc(ih)+'</span></span>'
       +'<span><b>Mode</b>: '+modeTxt(d)+'</span>'
       +'<span><b>UL total</b>: '+fB(d.cumul_rep_ul)+'</span>'
       +'<span><b>DL total</b>: '+fB(d.cumul_rep_dl)+'</span>'
@@ -182,7 +183,7 @@ function refresh(){
       var o=document.createElement('option');
       var m=getMode(d);
       o.value=ih;
-      o.textContent=fName(d,ih)+' ['+m+'] '+fR(ratioNum(d));
+      o.textContent=fNameRaw(d,ih)+' ['+m+'] '+fR(ratioNum(d));
       sel.appendChild(o);
     });
     // auto-select from URL param
@@ -193,10 +194,11 @@ function refresh(){
     if(_cmp){buildPicker();drawCompare();}else{loadChart();}
   }).catch(e=>console.error(e));
 }
-// charger Chart.js puis init
+// Chart.js 4.6.1 is shipped in static/ (no third-party script at run time)
 var _s=document.createElement('script');
-_s.src='https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js';
+_s.src='/static/chart.umd.min.js?v=4.6.1';
 _s.onload=refresh;
+_s.onerror=function(){document.getElementById('nosel').textContent='static/chart.umd.min.js is missing - charts unavailable.';};
 document.head.appendChild(_s);
 
 initUI('charts');

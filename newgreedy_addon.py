@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NewGreedy v1.7.7 — core addon"""
+"""NewGreedy — core addon"""
 #
 # NewGreedy - BitTorrent announce proxy
 # Copyright (C) 2026  Mrt0t0
@@ -17,33 +17,51 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #
-import os, random, math, time, json, re, hashlib, logging, configparser, threading
+import os, random, time, json, hashlib, logging, threading
 from logging.handlers import RotatingFileHandler
-from datetime import datetime
 from urllib.parse import urlparse, parse_qs, unquote_to_bytes, quote_from_bytes
 from mitmproxy import http
 import pathlib
 
-from _version import (VERSION, bd_find_int, bd_replace_int, bd_top_str, notify,
-                      notify_configure, atomic_write_json)
-import client_profiles
-
-SCHEMA_VER    = 7
+ADDON_VERSION = "v1.7.8"
 _BASE         = pathlib.Path(__file__).parent.resolve()
-LOG_FILE           = str(_BASE / "newgreedy.log")
-STATS_FILE         = str(_BASE / "stats.json")
-PURGE_PENDING_FILE = str(_BASE / "purge_pending.json")
-CONTROL_FILE       = str(_BASE / "control.json")
-REGISTRY_FILE      = str(_BASE / "torrent_registry.json")
+
+# mitmproxy reloads this file as soon as it changes on disk, while the other modules
+# stay loaded: after an update, mixed versions must not run - they fail closed instead
+_IMPORT_ERROR = ""
+try:
+    import _version
+    if getattr(_version, "VERSION", "") != ADDON_VERSION:
+        raise ImportError(f"engine files are {ADDON_VERSION} but {getattr(_version, 'VERSION', '?')} "
+                          f"is still loaded - restart NewGreedy to finish the update")
+    from _version import (VERSION, bd_find_int, bd_replace_int, bd_top_str, notify,
+                          notify_configure)
+    import client_profiles
+    import config_schema as cs
+    import datastore
+    import backups
+    import engine_model
+    from engine_model import (SessionIdentity, TorrentStats, parse_hours, tracker_domain as _tracker_domain,
+                              domain_match as _domain_match)
+    from engine_state import StateMixin, STATS_FILE, CONFIG_FILE, KEY_SEP, MIN_HASH_LEN, _short
+    _DATA = datastore.DATA_DIR
+except Exception as _e:
+    _IMPORT_ERROR = str(_e) or type(_e).__name__
+    VERSION = ADDON_VERSION
+    _DATA = pathlib.Path(os.environ.get("NEWGREEDY_DATA_DIR") or _BASE).resolve()
+
+    class StateMixin:  # the engine is replaced by FailClosedAddon in this case
+        pass
+
+LOG_FILE        = str(_DATA / "newgreedy.log")
 
 LOG_MAX_BYTES   = 10 * 1024 * 1024
 LOG_BACKUPS     = 3
 LAST_SEEN_TTL   = 86400
 MEM_CLEAN_EVERY = 3600
-HISTORY_MAX     = 200
-HISTORY_FULL_S  = 86400
-KEY_SEP         = "|"
 CONTROL_POLL    = 5.0
+CONFIG_POLL     = 5.0
+STATUS_EVERY    = 5.0
 
 _LOG_FORMAT = "%(asctime)s %(message)s"
 
@@ -55,6 +73,8 @@ logger.setLevel(logging.INFO)
 
 TRACKER_BACKOFF_THRESHOLD = 3
 TRACKER_BACKOFF_MAX_S     = 1800
+BW_MIN_WINDOW_S           = 60
+BW_KEEP_S                 = 86400
 
 DESYNC_MAX_SPREAD  = 0.45
 DESYNC_EPOCH_S     = 3600
@@ -64,81 +84,37 @@ IDENTITY_MODES     = ("stable", "drift", "rotate")
 TRACKERID_MAX      = 128
 
 
-def _file_handler_attached() -> bool:
+def _file_handler():
     for h in logger.handlers:
         if isinstance(h, RotatingFileHandler):
             try:
                 if os.path.abspath(h.baseFilename) == os.path.abspath(LOG_FILE):
-                    return True
+                    return h
             except Exception:
                 continue
-    return False
+    return None
 
 
-def _ensure_file_handler():
-    if _file_handler_attached():
-        return
-    fh = RotatingFileHandler(LOG_FILE, maxBytes=LOG_MAX_BYTES,
-                             backupCount=LOG_BACKUPS, encoding="utf-8")
-    fh.setFormatter(logging.Formatter(_LOG_FORMAT))
-    fh.setLevel(logging.INFO)
-    logger.addHandler(fh)
+def _ensure_file_handler(level=None):
+    fh = _file_handler()
+    if fh is None:
+        try:
+            fh = RotatingFileHandler(LOG_FILE, maxBytes=LOG_MAX_BYTES,
+                                     backupCount=LOG_BACKUPS, encoding="utf-8")
+        except OSError:
+            return
+        fh.setFormatter(logging.Formatter(_LOG_FORMAT))
+        fh.setLevel(logging.DEBUG)
+        logger.addHandler(fh)
+    if level is not None:
+        logger.setLevel(level)
 
 
 _ensure_file_handler()
 
 
-def _tracker_domain(url):
-    try:
-        return urlparse(url).netloc.split(":")[0]
-    except Exception:
-        return ""
-
-
-def _validate_config(c):
-    checks = [
-        ("spoofing", "target_ratio", float),
-        ("spoofing", "target_ratio_buffer", float),
-        ("spoofing", "catch_up_factor", float),
-        ("spoofing", "max_ratio_per_torrent", float),
-        ("spoofing", "max_global_ratio_per_tracker", float),
-        ("spoofing", "max_simulated_speed_mbps", float),
-        ("spoofing", "upload_noise_pct", float),
-        ("spoofing", "stagnation_probability", float),
-        ("spoofing", "seed_credit_mb", float),
-        ("advanced", "min_announce_interval", int),
-        ("advanced", "stall_announce_threshold", int),
-        ("advanced", "min_announces_before_stagnation", int),
-        ("advanced", "interval_jitter_pct", float),
-        ("advanced", "corrupt_field_probability", float),
-        ("anti_detection", "desync_spread_pct", float),
-        ("anti_detection", "desync_min_gap", int),
-        ("anti_detection", "startup_burst_window", int),
-        ("anti_detection", "startup_ramp_floor", float),
-        ("stats", "tracker_cumul_ttl_days", int),
-        ("stats", "stopped_purge_delay", int),
-        ("client", "version_bump_probability", float),
-        ("bandwidth", "global_max_speed_mbps", float),
-        ("bandwidth", "max_download_speed_mbps", float),
-        ("bandwidth", "per_torrent_speed_cap_mbps", float),
-        ("bandwidth", "circadian_night_factor", float),
-    ]
-    for section, key, typ in checks:
-        raw = c.get(section, key, fallback=None)
-        if raw is None:
-            continue
-        try:
-            typ(raw)
-        except (ValueError, TypeError):
-            logger.warning("config.ini [%s] %s='%s' is not a valid %s - fallback will be used",
-                           section, key, raw, typ.__name__)
-
-
 def _load_cfg():
-    c = configparser.ConfigParser(inline_comment_prefixes=(";", "#"), interpolation=None)
-    c.read(str(_BASE / "config.ini"))
-    _validate_config(c)
-    return c
+    return cs.load(CONFIG_FILE)
 
 
 def _extract_infohash(raw_query: bytes) -> str:
@@ -176,307 +152,33 @@ def _pct_encode(data: bytes) -> bytes:
     return quote_from_bytes(data, safe="").encode()
 
 
-def _pareto_noise(inc: float, noise_pct: float) -> float:
-    u = random.random()
-    if u < 0.85:
-        return inc * random.gauss(1.0, noise_pct)
-    burst = random.uniform(1.5, 3.0)
-    return inc * burst if random.random() < 0.5 else inc / burst
-
-
-def _parse_hours(spec: str):
-    try:
-        parts = spec.strip().split("-")
-        lo, hi = int(parts[0]), int(parts[1])
-        if not (0 <= lo <= 23) or not (0 <= hi <= 23):
-            logger.warning("inject_hours '%s' out of range 0-23 - falling back to 0-23", spec)
-            return 0, 23
-        return lo, hi
-    except Exception:
-        logger.warning("inject_hours '%s' invalid - falling back to 0-23", spec)
-        return 0, 23
-
-
-def _compress_history(hist, now):
-    if not hist:
-        return []
-    cutoff = now - HISTORY_FULL_S
-    recent = [p for p in hist if p.get("t", 0) >= cutoff]
-    old    = [p for p in hist if p.get("t", 0) < cutoff]
-    bucket = {}
-    for p in old:
-        bucket[p.get("t", 0) // 3600] = p
-    merged = sorted(bucket.values(), key=lambda x: x.get("t", 0)) + recent
-    return merged[-HISTORY_MAX:]
-
-
-class SessionIdentity:
-    __slots__ = ("profile_name", "profile", "peer_id", "user_agent", "port", "salt",
-                 "mode", "bumped_from")
-
-    def __init__(self, wanted, port_lo, port_hi, saved=None, mode="stable", bump_p=0.0):
-        saved = saved or {}
-        name = saved.get("profile") or ""
-        if wanted and wanted.strip().lower() in client_profiles.PROFILES:
-            name = wanted.strip().lower()
-        elif name not in client_profiles.PROFILES:
-            name = client_profiles.resolve_profile(wanted)
-        self.profile_name = name
-        self.profile      = client_profiles.PROFILES[name]
-        self.mode         = mode
-        self.bumped_from  = ""
-        saved_ua  = saved.get("user_agent") or ""
-        saved_pid = saved.get("peer_id") or ""
-        if saved_ua not in client_profiles.user_agents(self.profile):
-            saved_ua, saved_pid = "", ""
-        prefix, ua = client_profiles.pick_identity(self.profile, saved_ua)
-        if mode == "drift":
-            if (saved_ua and bump_p > 0
-                    and client_profiles.can_bump(self.profile, saved_ua)
-                    and random.random() < bump_p):
-                self.bumped_from = saved_ua
-                prefix, ua = client_profiles.bump_identity(self.profile, saved_ua)
-            saved_pid = ""
-        self.user_agent = ua
-        try:
-            coherent = bytes.fromhex(saved_pid).startswith(prefix) if saved_pid else False
-        except ValueError:
-            coherent = False
-        self.peer_id = saved_pid if coherent else client_profiles.make_peer_id(self.profile, ua).hex()
-        try:
-            self.port = int(saved.get("port") or 0) or random.randint(port_lo, port_hi)
-        except (TypeError, ValueError):
-            self.port = random.randint(port_lo, port_hi)
-        salt = saved.get("salt") or ""
-        if not isinstance(salt, str) or len(salt) != 16:
-            salt = os.urandom(8).hex()
-        self.salt = salt
-
-    def salt_bytes(self):
-        try:
-            return bytes.fromhex(self.salt)
-        except ValueError:
-            self.salt = os.urandom(8).hex()
-            return bytes.fromhex(self.salt)
-
-    def peer_id_bytes(self):
-        try:
-            raw = bytes.fromhex(self.peer_id)
-        except ValueError:
-            raw = b""
-        if len(raw) != 20:
-            raw = client_profiles.make_peer_id(self.profile, self.user_agent)
-            self.peer_id = raw.hex()
-        return raw
-
-    def as_dict(self):
-        return {"profile": self.profile_name, "peer_id": self.peer_id,
-                "user_agent": self.user_agent, "port": self.port, "salt": self.salt}
-
-
-
-class TorrentStats:
-    __slots__ = (
-        "_stagnation_p", "_catch_up", "_max_speed", "_noise_pct", "_max_ratio_t",
-        "_seed_credit", "_stall_thr", "_min_ann_stag", "_target_buf",
-        "_target_ratio", "_auto_stop", "_active_hours", "_cumul_rep_ul",
-        "_cumul_rep_dl", "_cumul_real_ul", "_ann_count", "_zero_dl_count", "_is_net_stalled",
-        "_is_algo_stalled", "_prev_rep_ul", "_target_reached", "_leecher_count",
-        "_seed_fake_dl", "_history", "_mode", "_last_announce_ts",
-        "_peer_id", "_port", "_key", "_tracker_intervals", "_trackers",
-        "_profile_name", "_user_agent", "_size_bytes", "_paused", "_tags",
-        "_night_factor", "_smoothing", "_speed_cap", "_numwant", "_burst_rank",
-        "_reported_dl", "_trackerids", "_dl_capped", "_seen_ul",
-    )
-
-    def __init__(self, params):
-        (self._stagnation_p, self._catch_up, self._max_speed, self._noise_pct,
-         self._max_ratio_t, self._seed_credit, self._stall_thr,
-         self._min_ann_stag, self._target_buf, self._target_ratio,
-         self._auto_stop, self._active_hours, self._night_factor, self._smoothing,
-         self._speed_cap) = params
-        self._cumul_rep_ul   = 0.0
-        self._cumul_rep_dl   = 0.0
-        self._cumul_real_ul  = 0.0
-        self._ann_count      = 0
-        self._zero_dl_count  = 0
-        self._is_net_stalled = False
-        self._is_algo_stalled= False
-        self._prev_rep_ul    = 0.0
-        self._target_reached = False
-        self._leecher_count  = -1
-        self._seed_fake_dl   = 0.0
-        self._history        = []
-        self._mode           = "down"
-        self._last_announce_ts = 0.0
-        self._peer_id        = ""
-        self._port           = 0
-        self._key            = 0
-        self._tracker_intervals = {}
-        self._trackers       = {}
-        self._profile_name   = ""
-        self._user_agent     = ""
-        self._size_bytes     = 0
-        self._paused         = False
-        self._tags           = []
-        self._numwant        = 0
-        self._burst_rank     = -1
-        self._reported_dl    = 0
-        self._trackerids     = {}
-        self._dl_capped      = False
-        self._seen_ul        = 0.0
-
-    def adopt_identity(self, ident):
-        self._profile_name = ident.profile_name
-        self._peer_id      = ident.peer_id
-        self._user_agent   = ident.user_agent
-        self._port         = ident.port
-        if not self._key:
-            self._key = random.randint(1, 0xFFFFFFFF)
-        return ident.profile
-
-    def dl_delta(self, domain, real_dl):
-        t = self._trackers.setdefault(domain, {"ul": 0.0, "dl": 0.0, "seen_dl": 0.0})
-        seen = float(t.get("seen_dl", 0.0))
-        t["seen_dl"] = float(real_dl)
-        return float(real_dl) if real_dl < seen else float(real_dl) - seen
-
-    def record_tracker(self, domain, delta_ul, delta_dl):
-        t = self._trackers.setdefault(domain, {"ul": 0.0, "dl": 0.0, "seen_dl": 0.0})
-        t["ul"] += delta_ul
-        t["dl"] += delta_dl
-
-    def _hour_factor(self) -> float:
-        hour = datetime.now().hour
-        lo, hi = self._active_hours
-        inside = (lo <= hour <= hi) if lo <= hi else (hour >= lo or hour <= hi)
-        if not self._smoothing:
-            return 1.0 if inside else 0.0
-        span = (hi - lo) % 24 or 24
-        pos = (hour - lo) % 24
-        if pos > span:
-            return self._night_factor
-        phase = math.sin(math.pi * (pos / span)) if span else 1.0
-        return self._night_factor + (1.0 - self._night_factor) * phase
-
-    def _smart_stagnation(self, ann, rp) -> bool:
-        if ann < self._min_ann_stag or rp < 0.30:
-            return False
-        if ann > 30 and rp < 0.65:
-            return False
-        p = self._stagnation_p * (1.5 if rp > 0.85 else 1.1 if rp > 0.60 else 1.0)
-        if self._leecher_count == 0:
-            return True
-        return random.random() < p
-
-    def _calc_upload(self, real_ul, cum_dl, interval, ann, budget, ramp=1.0):
-        if self._paused:
-            return self._cumul_rep_ul, True
-        factor = self._hour_factor() * max(0.0, min(1.0, ramp))
-        if factor <= 0.01:
-            return self._cumul_rep_ul, True
-        speed_ceiling = min(self._max_speed, self._speed_cap) * interval * factor
-        if budget is not None:
-            speed_ceiling = min(speed_ceiling, budget)
-        if speed_ceiling <= 0:
-            return self._cumul_rep_ul, True
-        if self._auto_stop and self._target_reached:
-            return self._cumul_rep_ul + (real_ul * random.uniform(0.9, 1.1) if real_ul > 0 else 0), False
-        if cum_dl <= 0:
-            inc = real_ul * random.uniform(1.2, 1.6) if real_ul > 0 else self._seed_credit * random.uniform(0.8, 1.2)
-            return self._cumul_rep_ul + min(inc * factor, speed_ceiling), False
-        target_ul = cum_dl * self._target_ratio
-        rp        = self._cumul_rep_ul / target_ul if target_ul > 0 else 1.0
-        if self._auto_stop and rp >= 1.0:
-            if not self._target_reached:
-                self._target_reached = True
-                logger.info("[TARGET_REACHED] ratio target %.2f reached, injection stopped", self._target_ratio)
-            return self._cumul_rep_ul + (real_ul * random.uniform(0.9, 1.1) if real_ul > 0 else 0), False
-        if self._smart_stagnation(ann, rp):
-            return self._cumul_rep_ul, True
-        remaining = target_ul - self._cumul_rep_ul
-        if remaining <= 0:
-            return self._cumul_rep_ul + (real_ul * random.uniform(0.9, 1.1) if real_ul > 0 else 0), False
-        decay = math.exp(-0.08 * max(ann - 1, 0))
-        inc   = min(remaining * self._catch_up * (1 + 0.5 * decay) * factor, speed_ceiling)
-        inc   = max(0, min(_pareto_noise(inc, self._noise_pct), speed_ceiling))
-        return max(self._cumul_rep_ul, min(self._cumul_rep_ul + inc, cum_dl * self._max_ratio_t)), False
-
-    def coherent_progress(self, client_left, real_dl, rep_dl, gap, dl_cap):
-        self._dl_capped = False
-        want = int(self._seed_fake_dl) if (client_left == 0 and real_dl == 0) else int(rep_dl)
-        if self._size_bytes > 0:
-            want = min(want, self._size_bytes)
-        prev = self._reported_dl
-        free = max(prev, int(real_dl))
-        if want > free and prev > 0 and dl_cap > 0:
-            ceiling = free + int(dl_cap * gap)
-            if want > ceiling:
-                want = ceiling
-                self._dl_capped = True
-        self._reported_dl = max(0, want)
-        if self._size_bytes > 0:
-            return self._reported_dl, max(0, self._size_bytes - self._reported_dl)
-        return self._reported_dl, client_left
-
-    def _snapshot(self):
-        now = int(time.time())
-        self._history.append({
-            "t":  now,
-            "ul": int(self._cumul_rep_ul),
-            "dl": int(self._cumul_rep_dl),
-        })
-        if len(self._history) > HISTORY_MAX:
-            self._history = _compress_history(self._history, now)
-
-    def compute(self, real_ul, real_dl, interval, event=None, budget=None, ramp=1.0):
-        self._ann_count     += 1
-        self._cumul_real_ul += real_ul if real_ul < self._seen_ul else real_ul - self._seen_ul
-        self._seen_ul        = real_ul
-        if real_dl > 0 and self._cumul_rep_dl > real_dl * 1.5:
-            self._cumul_rep_dl = real_dl
-        else:
-            self._cumul_rep_dl = max(self._cumul_rep_dl, real_dl)
-        is_pure_seeder = (real_dl == 0 and self._cumul_rep_dl == 0)
-        if real_dl == 0 and event not in ("started", "stopped") and not is_pure_seeder:
-            self._zero_dl_count += 1
-            if self._zero_dl_count >= self._stall_thr:
-                self._is_net_stalled = True
-        else:
-            self._zero_dl_count  = 0
-            self._is_net_stalled = False
-        new_ul, is_stag = self._calc_upload(real_ul, self._cumul_rep_dl, interval,
-                                            self._ann_count, budget, ramp)
-        self._is_algo_stalled = is_stag
-        if new_ul < self._prev_rep_ul:
-            new_ul = self._prev_rep_ul
-        delta              = new_ul - self._cumul_rep_ul
-        self._cumul_rep_ul = self._prev_rep_ul = new_ul
-        if self._ann_count % 5 == 0:
-            self._snapshot()
-        return new_ul, self._cumul_rep_dl, delta, is_stag
-
-
-class NewGreedyAddon:
+class NewGreedyAddon(StateMixin):
     def __init__(self):
         self._cfg            = _load_cfg()
         c                    = self._cfg
+        self._lock           = threading.RLock()
         self._stats          = {}
         self._tracker_cumul  = {}
         self._tracker_errors = {}
+        self._trk_state      = {}
         self._last_seen      = {}
         self._swarm_leechers = {}
         self._save_lock      = threading.Lock()
         self._last_flush_ts  = 0.0
         self._flush_interval = 60.0
-        self._last_mem_clean = time.time()
-        self._last_control   = 0.0
+        self._dirty          = False
+        self._force_save     = False
         self._control_mtime  = 0.0
+        self._registry_mtime = 0.0
+        self._cfg_mtime      = self._mtime(CONFIG_FILE)
+        self._cfg_loaded_ts  = time.time()
         self._registry       = self._load_registry()
         self._identity       = None
         self._overrides      = {}
         self._paused_set     = set()
         self._tag_map        = {}
+        self._consume_queue  = set()
+        self._udp_warned     = set()
         self._bw_window      = []
         self._bw_lock        = threading.Lock()
         self._domain_slots   = {}
@@ -485,7 +187,9 @@ class NewGreedyAddon:
         self._burst_order    = {}
         self._burst_closed   = False
         self._stopped_pending = {}
-        self._purge_lock     = threading.Lock()
+        self._announces      = 0
+        self._last_announce  = {}
+        self._tracker_cfg    = {}
         self._apply_config(c)
         if self._persist:
             self._load_stats()
@@ -493,66 +197,76 @@ class NewGreedyAddon:
         self._load_control()
         self._warn_udp_trackers()
         self._stop_evt = threading.Event()
+        self._write_status()
         threading.Thread(target=self._background_loop, daemon=True).start()
         mode = " [DRY-RUN]" if self._dry_run else ""
-        logger.info("NewGreedy %s started - proxy listening on port %s%s",
-                    VERSION, c.get("proxy", "listen_port", fallback="3456"), mode)
+        logger.info("NewGreedy %s started - proxy listening on %s:%s%s", VERSION,
+                    cs.get(c, "proxy", "listen_host"), cs.get(c, "proxy", "listen_port"), mode)
+
+    @staticmethod
+    def _mtime(path):
+        try:
+            return os.path.getmtime(path)
+        except OSError:
+            return 0.0
 
     def _apply_config(self, c):
-        self._stats_params   = self._build_stats_params(c)
-        self._max_global_r   = c.getfloat("spoofing", "max_global_ratio_per_tracker", fallback=2.5)
-        self._min_interval   = c.getint("advanced", "min_announce_interval", fallback=1800)
-        self._jitter_pct     = c.getfloat("advanced", "interval_jitter_pct", fallback=0.08)
-        self._corrupt_p      = c.getfloat("advanced", "corrupt_field_probability", fallback=0.05)
-        self._respect_iv     = c.getboolean("advanced", "respect_tracker_interval", fallback=True)
-        self._cumul_ttl      = c.getint("stats", "tracker_cumul_ttl_days", fallback=30) * 86400
-        self._spoof_ua       = c.getboolean("anti_detection", "spoof_user_agent", fallback=True)
-        self._ua_mode        = (c.get("anti_detection", "user_agent_mode", fallback="random") or "random").strip().lower()
-        self._ua_fixed       = (c.get("anti_detection", "user_agent_value", fallback="") or "").strip()
-        self._spoof_pid      = c.getboolean("anti_detection", "spoof_peer_id", fallback=True)
-        self._spoof_peers    = c.getboolean("anti_detection", "spoof_peers", fallback=True)
-        self._spoof_port     = c.getboolean("anti_detection", "spoof_port", fallback=True)
-        self._spoof_hdr      = c.getboolean("anti_detection", "spoof_headers", fallback=True)
-        self._intercept_scrape = c.getboolean("anti_detection", "intercept_scrape", fallback=False)
-        legacy_cluster       = c.getboolean("spoofing", "anti_clustering", fallback=True)
-        self._desync         = c.getboolean("anti_detection", "desync_announces", fallback=legacy_cluster)
-        self._desync_pct     = max(0.0, min(DESYNC_MAX_SPREAD,
-                                            c.getfloat("anti_detection", "desync_spread_pct", fallback=0.18)))
-        self._desync_gap     = max(0, c.getint("anti_detection", "desync_min_gap", fallback=45))
-        self._burst          = c.getboolean("anti_detection", "startup_burst", fallback=True)
-        self._burst_window   = max(0, c.getint("anti_detection", "startup_burst_window", fallback=300))
-        self._burst_floor    = max(0.0, min(1.0, c.getfloat("anti_detection", "startup_ramp_floor", fallback=0.15)))
-        lo, hi               = c.get("anti_detection", "port_range", fallback="6881-6999").split("-")
-        self._port_lo, self._port_hi = int(lo), int(hi)
-        self._wl             = [x.strip() for x in c.get("anti_detection", "tracker_whitelist", fallback="").split(",") if x.strip()]
-        self._bl             = [x.strip() for x in c.get("anti_detection", "tracker_blacklist", fallback="").split(",") if x.strip()]
-        self._echo_tid       = c.getboolean("anti_detection", "echo_trackerid", fallback=True)
-        self._persist        = c.getboolean("stats", "persist_stats", fallback=True)
-        self._auto_purge     = c.getboolean("stats", "auto_purge_stopped", fallback=True)
-        self._stopped_grace  = max(0, c.getint("stats", "stopped_purge_delay", fallback=120))
-        self._profile_cfg    = c.get("client", "client_profile", fallback="random")
-        self._rotate_profile = c.getboolean("client", "rotate_profile_on_restart", fallback=True)
-        self._identity_mode  = self._resolve_identity_mode(c)
-        self._bump_p         = max(0.0, min(1.0, c.getfloat("client", "version_bump_probability",
-                                                            fallback=0.10)))
-        self._global_speed   = c.getfloat("bandwidth", "global_max_speed_mbps", fallback=0.0) * 1e6
-        self._dl_cap         = max(0.0, c.getfloat("bandwidth", "max_download_speed_mbps",
-                                                   fallback=12.0)) * 1e6
-        self._dry_run        = c.getboolean("simulation", "dry_run", fallback=False)
+        g = lambda s, k: cs.get(c, s, k)  # noqa: E731
         self._tracker_cfg    = self._build_tracker_overrides(c)
+        self._stats_params   = self._build_stats_params(c)
+        self._max_global_r   = g("spoofing", "max_global_ratio_per_tracker")
+        self._min_interval   = g("advanced", "min_announce_interval")
+        self._jitter_pct     = g("advanced", "interval_jitter_pct")
+        self._corrupt_p      = g("advanced", "corrupt_field_probability")
+        self._respect_iv     = g("advanced", "respect_tracker_interval")
+        self._cumul_ttl      = g("stats", "tracker_cumul_ttl_days") * 86400
+        self._spoof_ua       = g("anti_detection", "spoof_user_agent")
+        self._ua_mode        = g("anti_detection", "user_agent_mode")
+        self._ua_fixed       = (g("anti_detection", "user_agent_value") or "").strip()
+        self._spoof_pid      = g("anti_detection", "spoof_peer_id")
+        self._spoof_peers    = g("anti_detection", "spoof_peers")
+        self._spoof_port     = g("anti_detection", "spoof_port")
+        self._spoof_hdr      = g("anti_detection", "spoof_headers")
+        legacy_cluster       = g("spoofing", "anti_clustering")
+        self._desync         = cs.get(c, "anti_detection", "desync_announces", legacy_cluster)
+        self._desync_pct     = max(0.0, min(DESYNC_MAX_SPREAD, g("anti_detection", "desync_spread_pct")))
+        self._desync_gap     = max(0, g("anti_detection", "desync_min_gap"))
+        self._burst          = g("anti_detection", "startup_burst")
+        self._burst_window   = max(0, g("anti_detection", "startup_burst_window"))
+        self._burst_floor    = max(0.0, min(1.0, g("anti_detection", "startup_ramp_floor")))
+        self._port_lo, self._port_hi = g("anti_detection", "port_range")
+        self._wl             = g("anti_detection", "tracker_whitelist")
+        self._bl             = g("anti_detection", "tracker_blacklist")
+        self._echo_tid       = g("anti_detection", "echo_trackerid")
+        self._persist        = g("stats", "persist_stats")
+        self._auto_purge     = g("stats", "auto_purge_stopped")
+        self._stopped_grace  = max(0, g("stats", "stopped_purge_delay"))
+        self._inactive_hours = g("stats", "inactive_purge_hours")
+        self._trash_days     = g("stats", "trash_retention_days")
+        engine_model.HIST["max"] = g("stats", "history_max_points")
+        engine_model.HIST["retention"] = g("stats", "history_retention_days") * 86400
+        self._profile_cfg    = g("client", "client_profile")
+        self._rotate_profile = g("client", "rotate_profile_on_restart")
+        self._identity_mode  = self._resolve_identity_mode(c)
+        self._bump_p         = max(0.0, min(1.0, g("client", "version_bump_probability")))
+        self._global_speed   = g("bandwidth", "global_max_speed_mbps") * 1e6
+        self._dl_cap         = max(0.0, g("bandwidth", "max_download_speed_mbps")) * 1e6
+        self._dry_run        = g("simulation", "dry_run")
+        self._backup_cfg     = (g("backup", "auto_backup"), g("backup", "backup_interval_hours"),
+                                g("backup", "backup_keep"))
+        level = getattr(logging, g("advanced", "log_level"), logging.INFO)
+        _ensure_file_handler(level)
         notify_configure(
-            c.get("notifications", "webhook_url", fallback=""),
-            c.get("notifications", "webhook_format", fallback="generic"),
-            c.get("notifications", "webhook_events", fallback=""),
+            g("notifications", "webhook_url"),
+            g("notifications", "webhook_format"),
+            g("notifications", "webhook_events"),
+            g("notifications", "webhook_chat_id"),
         )
 
     def _resolve_identity_mode(self, c):
-        mode = (c.get("client", "session_identity", fallback="") or "").strip().lower()
+        mode = cs.get(c, "client", "session_identity")
         if mode in IDENTITY_MODES:
             return mode
-        if mode:
-            logger.warning("config.ini [client] session_identity='%s' unknown - "
-                           "expected one of %s", mode, ", ".join(sorted(IDENTITY_MODES)))
         return "rotate" if self._rotate_profile else "stable"
 
     def _build_tracker_overrides(self, c):
@@ -561,48 +275,61 @@ class NewGreedyAddon:
             if not section.startswith("tracker:"):
                 continue
             domain = section.split(":", 1)[1].strip().lower()
-            if domain:
-                out[domain] = dict(c[section])
-        if out:
+            if not domain:
+                continue
+            ov = {}
+            for key, raw in c[section].items():
+                if key not in cs.TRACKER_KEYS:
+                    logger.warning("config.ini [%s] %s is not a per-tracker setting - ignored", section, key)
+                    continue
+                value, problem = cs.tracker_value(key, raw)
+                if problem:
+                    logger.warning("config.ini [%s] %s = '%s' %s - global value used",
+                                   section, key, raw, problem)
+                    continue
+                ov[key] = value
+            out[domain] = ov
+        if out and out.keys() != self._tracker_cfg.keys():
             logger.info("Per-tracker overrides loaded for: %s", ", ".join(sorted(out)))
         return out
 
-    def _build_stats_params(self, c, domain=None):
-        def g(section, key, kind, default):
-            if domain:
-                ov = self._tracker_cfg.get(domain, {}) if hasattr(self, "_tracker_cfg") else {}
-                if key in ov:
-                    try:
-                        return kind(ov[key])
-                    except (ValueError, TypeError):
-                        pass
-            if kind is bool:
-                return c.getboolean(section, key, fallback=default)
-            if kind is int:
-                return c.getint(section, key, fallback=default)
-            if kind is float:
-                return c.getfloat(section, key, fallback=default)
-            return c.get(section, key, fallback=default)
+    def _override(self, domain, key, default):
+        ov = self._tracker_cfg.get(domain or "", {})
+        return ov[key] if key in ov else default
 
-        target = g("spoofing", "target_ratio", float, 1.5)
-        buf    = g("spoofing", "target_ratio_buffer", float, 0.03)
+    def _build_stats_params(self, c, domain=None):
+        def g(section, key):
+            return self._override(domain, key, cs.get(c, section, key))
+
+        target = g("spoofing", "target_ratio")
+        buf    = g("spoofing", "target_ratio_buffer")
         return (
-            g("spoofing", "stagnation_probability", float, 0.03),
-            g("spoofing", "catch_up_factor", float, 0.22),
-            g("spoofing", "max_simulated_speed_mbps", float, 10.0) * 1e6,
-            g("spoofing", "upload_noise_pct", float, 3.0) / 100,
-            g("spoofing", "max_ratio_per_torrent", float, 3.0),
-            g("spoofing", "seed_credit_mb", float, 5.0) * 1e6,
-            g("advanced", "stall_announce_threshold", int, 8),
-            g("advanced", "min_announces_before_stagnation", int, 10),
+            g("spoofing", "stagnation_probability"),
+            g("spoofing", "catch_up_factor"),
+            g("spoofing", "max_simulated_speed_mbps") * 1e6,
+            g("spoofing", "upload_noise_pct") / 100,
+            g("spoofing", "max_ratio_per_torrent"),
+            g("spoofing", "seed_credit_mb") * 1e6,
+            g("advanced", "stall_announce_threshold"),
+            g("advanced", "min_announces_before_stagnation"),
             buf,
             target + buf,
-            g("spoofing", "auto_stop_at_target", bool, True),
-            _parse_hours(g("advanced", "inject_hours", str, "0-23")),
-            g("bandwidth", "circadian_night_factor", float, 0.35),
-            g("bandwidth", "circadian_smoothing", bool, True),
-            g("bandwidth", "per_torrent_speed_cap_mbps", float, 12.0) * 1e6,
+            g("spoofing", "auto_stop_at_target"),
+            parse_hours(g("advanced", "inject_hours")),
+            g("bandwidth", "circadian_night_factor"),
+            g("bandwidth", "circadian_smoothing"),
+            g("bandwidth", "per_torrent_speed_cap_mbps") * 1e6,
         )
+
+    def _params_for(self, domain, cache=None):
+        if not domain or domain not in self._tracker_cfg:
+            return self._stats_params
+        if cache is not None and domain in cache:
+            return cache[domain]
+        params = self._build_stats_params(self._cfg, domain)
+        if cache is not None:
+            cache[domain] = params
+        return params
 
     def _init_identity(self):
         saved = None
@@ -635,366 +362,146 @@ class NewGreedyAddon:
                         self._burst_window, self._burst_floor * 100)
 
     def _new_stats(self, domain=None):
-        params = self._build_stats_params(self._cfg, domain) if domain else self._stats_params
-        return TorrentStats(params)
+        st = TorrentStats(self._params_for(domain))
+        st._domain = domain or ""
+        return st
+
+    # ── background work: everything that touches files runs here, off the proxy loop ──
 
     def _background_loop(self):
-        flag = _BASE / ".shutdown"
+        due = {}
+
+        def every(name, period, fn, *args):
+            now = time.time()
+            if now - due.get(name, 0) < period:
+                return
+            due[name] = now
+            try:
+                fn(*args)
+            except Exception as e:
+                logger.debug("background task %s failed: %s", name, e, exc_info=True)
+
         while not self._stop_evt.wait(1.0):
-            try:
-                self._sweep_stopped(time.time())
-            except Exception as e:
-                logger.debug("stopped sweep error: %s", e)
-            if flag.exists():
-                logger.info("Shutdown signal received - flushing stats")
-                if self._persist:
-                    self._save_stats(force=True)
-                try:
-                    flag.unlink()
-                except OSError:
-                    pass
-                self._stop_evt.set()
-                return
+            every("shutdown", 0, self._check_shutdown_flag)
+            every("stopped", 0, self._sweep_stopped)
+            every("purges", 0, self._apply_purges)
+            every("import", 0, self._apply_import)
+            every("control", CONTROL_POLL, self._reload_control)
+            every("config", CONFIG_POLL, self._maybe_reload_config)
+            every("registry", CONFIG_POLL, self._maybe_reload_registry)
+            every("inactive", 60, self._purge_inactive)
+            every("memory", MEM_CLEAN_EVERY, self._clean_memory)
+            every("trash", 3600, self._clean_trash)
+            every("backup", 60, self._auto_backup)
+            every("save", 0, self._save_if_due)
+            every("status", STATUS_EVERY, self._write_status)
 
-    def _note_stopped(self, ih_key, domain, now):
-        if not self._auto_purge:
+    def _check_shutdown_flag(self):
+        flag = datastore.SHUTDOWN_FLAG
+        if not flag.exists():
             return
-        if self._stopped_grace <= 0:
-            self._retire([(ih_key, now)], now)
-            return
-        with self._purge_lock:
-            self._stopped_pending[ih_key] = now
-        logger.debug("[STOPPED] %s@%s - retiring in %ds unless it announces again",
-                     ih_key, domain, self._stopped_grace)
-
-    def _cancel_stopped(self, ih_key):
-        with self._purge_lock:
-            if self._stopped_pending.pop(ih_key, None) is None:
-                return
-        logger.info("[RESUMED] %s - announced again before the purge delay, counters kept",
-                    ih_key)
-
-    def _sweep_stopped(self, now):
-        if not self._stopped_pending:
-            return
-        with self._purge_lock:
-            due = [(ih, ts) for ih, ts in self._stopped_pending.items()
-                   if (now - ts) >= self._stopped_grace]
-            for ih, _ in due:
-                del self._stopped_pending[ih]
-        if due:
-            self._retire(due, now)
-
-    def _retire(self, marked, now):
-        removed = []
-        for ih, ts in marked:
-            st = self._stats.get(ih)
-            if st is None or st._last_announce_ts > ts:
-                continue
-            del self._stats[ih]
-            removed.append(ih)
-            for k in [k for k in self._last_seen if k.split(KEY_SEP)[0] == ih]:
-                del self._last_seen[k]
-        if not removed:
-            return
-        if self._persist:
-            self._save_stats(force=True)
-        if len(removed) == 1:
-            logger.info("[PURGED] %s - removed after event=stopped", removed[0])
-        else:
-            logger.info("[PURGED] %d torrents removed after an event=stopped burst: %s",
-                        len(removed), ", ".join(sorted(removed)[:8])
-                        + (" ..." if len(removed) > 8 else ""))
-        notify("purged", "Torrents removed",
-               f"{len(removed)} torrent(s) sent event=stopped and were purged from stats.",
-               dedup_key="purged:" + ",".join(sorted(removed))[:96])
-
-    def _warn_udp_trackers(self):
-        udp_domains = set()
-        for meta in self._registry.values():
-            if not isinstance(meta, dict):
-                continue
-            for url in meta.get("udp_trackers", []):
-                d = _tracker_domain(url)
-                if d:
-                    udp_domains.add(d)
-        for d in sorted(udp_domains):
-            logger.warning("[UDP_BYPASS] %s - UDP tracker cannot be intercepted, announces bypass NewGreedy", d)
-        if udp_domains:
-            logger.warning("[UDP_BYPASS] %d UDP tracker domain(s) detected - real stats are reported to them",
-                           len(udp_domains))
-
-    def _load_control(self):
+        logger.info("Shutdown signal received - flushing stats")
+        self._save_stats(force=True)
         try:
-            mtime = os.path.getmtime(CONTROL_FILE)
+            flag.unlink()
         except OSError:
-            if self._paused_set or self._tag_map or self._overrides:
-                self._paused_set = set()
-                self._overrides = {}
-                self._tag_map = {}
-                for st in self._stats.values():
-                    st._paused = False
-                    st._tags = []
-            self._control_mtime = 0.0
+            pass
+
+    def _save_if_due(self):
+        if self._force_save:
+            self._force_save = False
+            self._save_stats(force=True)
+        elif self._dirty:
+            self._save_stats()
+
+    def _request_save(self):
+        self._dirty = True
+        self._force_save = True
+
+    def _auto_backup(self):
+        enabled, hours, keep = self._backup_cfg
+        backups.maybe_auto(enabled, hours, keep)
+
+    def _clean_trash(self):
+        n = datastore.trash_clean(self._trash_days)
+        if n:
+            logger.info("[TRASH] %d entr%s older than %d day(s) deleted for good",
+                        n, "y" if n == 1 else "ies", self._trash_days)
+
+    def _write_status(self, state="running", error=""):
+        with self._lock:
+            trackers = {d: dict(v, backoff=self._tracker_in_backoff(d))
+                        for d, v in self._trk_state.items()}
+            status = {
+                "state": state, "error": error, "version": VERSION, "pid": os.getpid(),
+                "started": self._session_start, "announces": self._announces,
+                "torrents": len(self._stats), "last_announce": dict(self._last_announce),
+                "trackers": trackers, "dry_run": self._dry_run,
+                "config_loaded": self._cfg_loaded_ts,
+                "client": self._identity.profile["name"] if self._identity else "",
+            }
+        datastore.write_status(status)
+
+    def _maybe_reload_config(self):
+        mtime = self._mtime(CONFIG_FILE)
+        if not mtime or mtime == self._cfg_mtime:
             return
-        if mtime == self._control_mtime:
-            return
-        self._control_mtime = mtime
-        try:
-            with open(CONTROL_FILE, encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception as e:
-            logger.debug("control file read error: %s", e)
-            return
-        self._paused_set = set(data.get("paused", []))
-        self._overrides  = {k: v for k, v in data.get("overrides", {}).items() if isinstance(v, dict)}
-        self._tag_map    = {k: list(v) for k, v in data.get("tags", {}).items() if isinstance(v, list)}
-        for ih, st in self._stats.items():
-            st._paused = ih in self._paused_set
-            st._tags   = self._tag_map.get(ih, [])
-        applied = self._apply_overrides()
-        if applied:
-            logger.info("[CONTROL] reloaded - %d paused, %d override(s)",
-                        len(self._paused_set), applied)
+        self._cfg_mtime = mtime
+        c = _load_cfg()
+        old = self._cfg
+        with self._lock:
+            self._cfg = c
+            self._apply_config(c)
+            cache = {}
+            for ih, st in self._stats.items():
+                before = st._base_target
+                st.set_params(self._params_for(st._domain, cache))
+                if abs(before - st._base_target) > 1e-9:
+                    st._target_reached = False
+            self._reapply_targets()
+            n = len(self._stats)
+        self._cfg_loaded_ts = time.time()
+        pending = sorted(f"{s}.{k}" for s, k in cs.RESTART_KEYS
+                         if old.get(s, k, fallback=None) != c.get(s, k, fallback=None))
+        logger.info("[CONFIG] config.ini reloaded - applied to %d torrent(s)%s", n,
+                    f"; restart needed for {', '.join(pending)}" if pending else "")
 
-    def _apply_overrides(self):
-        count = 0
-        consumed = []
-        for ih, ov in list(self._overrides.items()):
-            st = self._stats.get(ih)
-            if not st:
-                continue
-            count += self._apply_override_to(st, ih, ov)
-            if ov.pop("cumul_rep_ul", None) is not None:
-                consumed.append(ih)
-                if not ov:
-                    del self._overrides[ih]
-        if consumed:
-            self._consume_control(consumed)
-        return count
-
-    def _apply_override_to(self, st, ih, ov):
-        n = 0
-        if "target_ratio" in ov:
-            try:
-                st._target_ratio = float(ov["target_ratio"]) + st._target_buf
-                st._target_reached = False
-                n += 1
-            except (ValueError, TypeError):
-                pass
-        if "cumul_rep_ul" in ov:
-            try:
-                val = max(0.0, float(ov["cumul_rep_ul"]))
-                st._cumul_rep_ul = st._prev_rep_ul = val
-                n += 1
-                logger.info("[CONTROL] %s - upload counter set to %.1fM", ih, val / 1e6)
-            except (ValueError, TypeError):
-                pass
-        return n
-
-    def _consume_control(self, hashes):
-        try:
-            with open(CONTROL_FILE, encoding="utf-8") as f:
-                data = json.load(f)
-            overrides = data.get("overrides") if isinstance(data, dict) else None
-            if not isinstance(overrides, dict):
-                return
-            changed = False
-            for ih in hashes:
-                ov = overrides.get(ih)
-                if not isinstance(ov, dict) or "cumul_rep_ul" not in ov:
-                    continue
-                del ov["cumul_rep_ul"]
-                if not ov:
-                    del overrides[ih]
-                changed = True
-            if not changed:
-                return
-            data["overrides"] = overrides
-            atomic_write_json(CONTROL_FILE, data)
-            self._control_mtime = os.path.getmtime(CONTROL_FILE)
-        except Exception as e:
-            logger.debug("control consume error: %s", e)
-
-    def _load_registry(self):
-        try:
-            with open(REGISTRY_FILE, encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-
-    def _load_stats(self):
-        VALID = re.compile(r"^[0-9a-f]{6,40}$")
-        try:
-            with open(STATS_FILE, encoding="utf-8") as f:
-                raw = json.load(f)
-            schema = raw.get("_schema_version", 1)
-            tc_raw = raw.get("_tracker_cumul", {}) if schema >= 7 else {}
-            if schema < 7 and raw.get("_tracker_cumul"):
-                logger.warning("[CUMUL_RESET] per-tracker totals from schema v%d counted each "
-                               "announce's cumulative download instead of its delta - dropping "
-                               "them, the aggregate guard restarts from real figures", schema)
-            if isinstance(tc_raw, dict):
-                for domain, vals in tc_raw.items():
-                    if isinstance(vals, dict):
-                        self._tracker_cumul[domain] = {
-                            "ul": float(vals.get("ul", 0)),
-                            "dl": float(vals.get("dl", 0)),
-                            "ts": float(vals.get("ts", time.time())),
-                        }
-            loaded = 0
-            for k, d in raw.items():
-                if k.startswith("_"):
-                    continue
-                k = k.lower().strip()
-                if not VALID.match(k) or not isinstance(d, dict):
-                    continue
-                ul_key = "cumul_rep_ul" if "cumul_rep_ul" in d else "rep_ul"
-                dl_key = "cumul_rep_dl" if "cumul_rep_dl" in d else "rep_dl"
-                if ul_key not in d:
-                    continue
-                s = self._new_stats()
-                s._cumul_rep_ul  = float(d.get(ul_key, 0))
-                s._cumul_rep_dl  = float(d.get(dl_key, 0))
-                s._cumul_real_ul = float(d.get("cumul_real_ul", 0))
-                s._seen_ul       = float(d.get("seen_ul", 0))
-                s._ann_count     = int(d.get("ann_count", 0))
-                s._prev_rep_ul   = s._cumul_rep_ul
-                s._is_net_stalled= bool(d.get("stalled", False))
-                s._target_reached= bool(d.get("target_reached", False))
-                s._seed_fake_dl  = float(d.get("seed_fake_dl", 0))
-                s._history       = list(d.get("history", []))
-                s._mode          = d.get("mode", "down")
-                s._last_announce_ts = float(d.get("last_announce_ts", 0))
-                s._key           = int(d.get("key", 0) or 0)
-                s._size_bytes    = int(d.get("size_bytes", 0) or 0)
-                s._reported_dl   = int(d.get("reported_dl", 0) or 0)
-                tids = d.get("trackerids", {})
-                if isinstance(tids, dict):
-                    s._trackerids = {str(k2): str(v2) for k2, v2 in tids.items()
-                                     if isinstance(v2, str)}
-                iv = d.get("tracker_intervals", {})
-                s._tracker_intervals = {k2: int(v2) for k2, v2 in iv.items()} if isinstance(iv, dict) else {}
-                tr = d.get("trackers", {})
-                if isinstance(tr, dict):
-                    s._trackers = {
-                        k2: {"ul": float(v2.get("ul", 0)), "dl": float(v2.get("dl", 0)),
-                             "seen_dl": float(v2.get("seen_dl", 0))}
-                        for k2, v2 in tr.items() if isinstance(v2, dict)
-                    }
-                self._stats[k[:8]] = s
-                loaded += 1
-            logger.info("Stats loaded: %d torrents (schema v%d)", loaded, schema)
-        except FileNotFoundError:
-            logger.info("No stats file - starting fresh.")
-        except Exception as e:
-            logger.warning("Stats load error: %s", e)
-
-    def _save_stats(self, force=False):
-        now = time.time()
-        if not force and (now - self._last_flush_ts) < self._flush_interval:
-            return
-        _ensure_file_handler()
-        with self._save_lock:
-            try:
-                cutoff = now - 43200
-                data = {"_schema_version": SCHEMA_VER}
-                if self._identity:
-                    data["_identity"] = self._identity.as_dict()
-                tc_cutoff = now - self._cumul_ttl if self._cumul_ttl > 0 else 0
-                tc_out = {}
-                dropped_domains = []
-                for domain, tc in dict(self._tracker_cumul).items():
-                    ts = float(tc.get("ts", now))
-                    if tc_cutoff > 0 and ts < tc_cutoff:
-                        dropped_domains.append(domain)
-                        continue
-                    tc_out[domain] = {"ul": tc["ul"], "dl": tc["dl"], "ts": ts}
-                for domain in dropped_domains:
-                    self._tracker_cumul.pop(domain, None)
-                    logger.info("[CUMUL_PURGE] %s - inactive tracker dropped from cumul", domain)
-                data["_tracker_cumul"] = tc_out
-                try:
-                    with open(PURGE_PENDING_FILE, encoding="utf-8") as f:
-                        pending = json.load(f)
-                    for ih in pending:
-                        if ih in self._stats:
-                            del self._stats[ih]
-                            logger.info("[PURGE_SYNC] %s - removed from memory (web purge)", ih)
-                    os.remove(PURGE_PENDING_FILE)
-                except FileNotFoundError:
-                    pass
-                except Exception as e:
-                    logger.warning("purge_pending read error: %s", e)
-                purged = []
-                for ih, s in dict(self._stats).items():
-                    if s._last_announce_ts > 0 and s._last_announce_ts < cutoff and s._ann_count >= 5:
-                        purged.append(ih)
-                        continue
-                    data[ih] = {
-                        "cumul_rep_ul":     s._cumul_rep_ul,
-                        "cumul_rep_dl":     s._cumul_rep_dl,
-                        "cumul_real_ul":    s._cumul_real_ul,
-                        "seen_ul":          s._seen_ul,
-                        "ann_count":        s._ann_count,
-                        "stalled":          s._is_net_stalled,
-                        "prev_rep_ul":      s._prev_rep_ul,
-                        "target_reached":   s._target_reached,
-                        "seed_fake_dl":     s._seed_fake_dl,
-                        "history":          _compress_history(s._history, now),
-                        "mode":             s._mode,
-                        "last_announce_ts": s._last_announce_ts,
-                        "key":              s._key,
-                        "size_bytes":       s._size_bytes,
-                        "reported_dl":      s._reported_dl,
-                        "trackerids":       s._trackerids,
-                        "tracker_intervals": s._tracker_intervals,
-                        "trackers":         s._trackers,
-                    }
-                for ih in purged:
-                    del self._stats[ih]
-                    logger.info("[AUTO-PURGE] %s - no announce for 12h+", ih)
-                atomic_write_json(STATS_FILE, data)
-                self._last_flush_ts = now
-            except Exception as e:
-                logger.warning("Stats save failed: %s", e)
 
     def _clean_memory(self):
         now = time.time()
-        if (now - self._last_mem_clean) < MEM_CLEAN_EVERY:
-            return
-        self._last_mem_clean = now
-        _ensure_file_handler()
-        active = set(self._stats.keys())
-        cutoff = now - LAST_SEEN_TTL
-        removed = 0
-        for k in list(self._last_seen.keys()):
-            if self._last_seen[k] < cutoff:
-                del self._last_seen[k]
-                removed += 1
-        for sk in list(self._swarm_leechers.keys()):
-            if sk.split(KEY_SEP)[-1] not in active:
-                del self._swarm_leechers[sk]
-        for dk in list(self._desync_cache.keys()):
-            if dk.split(KEY_SEP)[0] not in active:
-                del self._desync_cache[dk]
-        for domain, slots in list(self._domain_slots.items()):
-            for k in [k for k in slots if k not in active]:
-                del slots[k]
-            if not slots:
-                del self._domain_slots[domain]
+        with self._lock:
+            active = set(self._stats.keys())
+            cutoff = now - LAST_SEEN_TTL
+            removed = 0
+            for k in list(self._last_seen.keys()):
+                if self._last_seen[k] < cutoff:
+                    del self._last_seen[k]
+                    removed += 1
+            for sk in list(self._swarm_leechers.keys()):
+                if sk.split(KEY_SEP)[-1] not in active:
+                    del self._swarm_leechers[sk]
+            for dk in list(self._desync_cache.keys()):
+                if dk.split(KEY_SEP)[0] not in active:
+                    del self._desync_cache[dk]
+            for domain, slots in list(self._domain_slots.items()):
+                for k in [k for k in slots if k not in active]:
+                    del slots[k]
+                if not slots:
+                    del self._domain_slots[domain]
         if removed:
             logger.debug("[MEM_CLEAN] removed %d stale last_seen entries", removed)
 
     def _bandwidth_budget(self, interval):
         if self._global_speed <= 0:
             return None
+        # an announce covers `interval` seconds of upload: the shared uplink is checked
+        # over that same span, not over the last minute only
+        window = max(BW_MIN_WINDOW_S, float(interval))
         now = time.time()
         with self._bw_lock:
-            self._bw_window = [(t, v) for t, v in self._bw_window if now - t < 60]
-            spent = sum(v for _, v in self._bw_window)
-        allowance = self._global_speed * 60
-        return max(0.0, allowance - spent)
+            self._bw_window = [(t, v) for t, v in self._bw_window if now - t < BW_KEEP_S]
+            spent = sum(v for t, v in self._bw_window if now - t < window)
+        return max(0.0, self._global_speed * window - spent)
 
     def _bandwidth_record(self, delta):
         if self._global_speed <= 0 or delta <= 0:
@@ -1008,11 +515,14 @@ class NewGreedyAddon:
 
     def _tracker_allowed(self, url):
         domain = _tracker_domain(url)
-        if self._bl and any(b in domain for b in self._bl):
+        if self._bl and _domain_match(domain, self._bl):
             return False
         if self._wl:
-            return any(w in domain for w in self._wl)
+            return _domain_match(domain, self._wl)
         return True
+
+    def _trk(self, domain):
+        return self._trk_state.setdefault(domain, {"last_ts": 0, "last_code": "", "errors": 0})
 
     def _tracker_in_backoff(self, domain) -> bool:
         err = self._tracker_errors.get(domain)
@@ -1024,46 +534,64 @@ class NewGreedyAddon:
         backoff = min(300 * (2 ** (count - TRACKER_BACKOFF_THRESHOLD)), TRACKER_BACKOFF_MAX_S)
         return (time.time() - last_ts) < backoff
 
-    def _record_tracker_error(self, domain):
+    def _record_tracker_error(self, domain, reason=""):
         err = self._tracker_errors.get(domain, (0, 0))
         count = err[0] + 1
         self._tracker_errors[domain] = (count, time.time())
+        self._trk(domain)["errors"] = count
         if count == TRACKER_BACKOFF_THRESHOLD:
-            logger.warning("[TRACKER_DOWN] %s - %d consecutive errors, entering backoff", domain, count)
+            logger.warning("[TRACKER_DOWN] %s - %d consecutive errors, entering backoff%s",
+                           domain, count, f" ({reason})" if reason else "")
             notify("tracker_down", "Tracker unreachable",
-                          f"{domain} returned {count} consecutive errors and is now in backoff.",
-                          dedup_key="down:" + domain)
+                   f"{domain} failed {count} times in a row{' (' + reason + ')' if reason else ''} "
+                   f"and is now in backoff.", dedup_key="down:" + domain)
 
     def _record_tracker_success(self, domain):
+        self._trk(domain)["errors"] = 0
         if domain in self._tracker_errors:
             prev_count = self._tracker_errors[domain][0]
             del self._tracker_errors[domain]
             if prev_count >= TRACKER_BACKOFF_THRESHOLD:
                 logger.info("[TRACKER_UP] %s - recovered", domain)
                 notify("tracker_up", "Tracker recovered",
-                              f"{domain} is responding again.", dedup_key="up:" + domain)
+                       f"{domain} is responding again.", dedup_key="up:" + domain)
+
+    def _adopt_legacy(self, ih):
+        """Stats saved by an older version under the 8-digit prefix: moved to the full
+        info-hash, unless the registry says that entry belongs to another torrent."""
+        legacy = ih[:MIN_HASH_LEN]
+        if legacy == ih or legacy not in self._stats:
+            return None
+        meta = self._registry.get(legacy)
+        if isinstance(meta, dict) and meta.get("info_hash") and meta["info_hash"] != ih:
+            return None
+        st = self._stats.pop(legacy)
+        self._stats[ih] = st
+        self._dirty = True
+        logger.info("[MIGRATE] %s - stats now keyed by the full info-hash", legacy)
+        return st
 
     def _get_stats(self, ih, domain=None):
-        if ih not in self._stats:
-            st = self._new_stats(domain)
-            meta = self._registry.get(ih)
-            if isinstance(meta, dict):
-                try:
-                    st._size_bytes = int(meta.get("size_bytes", 0))
-                    st._seed_fake_dl = float(st._size_bytes)
-                except (ValueError, TypeError):
-                    pass
-            st._paused = ih in self._paused_set
-            st._tags   = self._tag_map.get(ih, [])
-            self._stats[ih] = st
-            ov = self._overrides.get(ih)
-            if ov:
-                self._apply_override_to(st, ih, ov)
-                if ov.pop("cumul_rep_ul", None) is not None:
-                    if not ov:
-                        del self._overrides[ih]
-                    self._consume_control([ih])
-        return self._stats[ih]
+        st = self._stats.get(ih) or self._adopt_legacy(ih)
+        if st is not None:
+            return st
+        st = self._new_stats(domain)
+        self._size_from_registry(st, datastore.registry_meta(self._registry, ih))
+        if st._size_bytes > 0:
+            st._seed_fake_dl = float(st._size_bytes)
+        st._paused = datastore.alias_key(self._paused_set, ih) is not None
+        tk = datastore.alias_key(self._tag_map, ih)
+        st._tags   = self._tag_map[tk] if tk else []
+        self._stats[ih] = st
+        ok = datastore.alias_key(self._overrides, ih)
+        ov = self._overrides.get(ok) if ok else None
+        if ov:
+            self._apply_override_to(st, ih, ov)
+            if ov.pop("cumul_rep_ul", None) is not None:
+                if not ov:
+                    del self._overrides[ok]
+                self._consume_queue.add(ok)
+        return st
 
     def _parse_int(self, qs, key, default=0):
         try:
@@ -1073,7 +601,8 @@ class NewGreedyAddon:
 
     def _phase(self, ih_key, domain, tag=b""):
         salt = self._identity.salt_bytes() if self._identity else b""
-        h = hashlib.sha1(salt + tag + domain.encode("utf-8", "replace") + ih_key.encode()).digest()
+        h = hashlib.sha1(salt + tag + domain.encode("utf-8", "replace")
+                         + ih_key[:MIN_HASH_LEN].encode()).digest()
         return int.from_bytes(h[:4], "big") / 4294967295.0
 
     def _cluster_pressure(self, domain, ih_key, now):
@@ -1135,31 +664,33 @@ class NewGreedyAddon:
         return interval + interval * self._jitter_pct * random.uniform(-1, 1)
 
     def request(self, flow: http.HTTPFlow):
+        with self._lock:
+            self._request(flow)
+
+    def _request(self, flow):
         url = flow.request.pretty_url
         if not self._tracker_allowed(url):
-            return
-        if self._intercept_scrape and "scrape" in urlparse(url).path:
             return
         if not self._is_announce(url):
             return
         domain = _tracker_domain(url)
-        if self._tracker_in_backoff(domain):
-            return
+        # a tracker in backoff still gets a rewritten announce: passing it through would
+        # hand it the real peer_id and an upload figure lower than the last one it saw
 
         now = time.time()
-        if now - self._last_control > CONTROL_POLL:
-            self._last_control = now
-            self._load_control()
-
         raw_path  = flow.request.data.path
         q_start   = raw_path.find(b"?")
         raw_query = raw_path[q_start + 1:] if q_start != -1 else b""
         ih_hex    = _extract_infohash(raw_query)
-        if not ih_hex or len(ih_hex) < 6:
+        if not ih_hex or len(ih_hex) < MIN_HASH_LEN:
             return
-        ih_key = ih_hex[:8]
+        ih_key = ih_hex
+        self._announces += 1
+        self._last_announce = {"ts": now, "tracker": domain, "hash": _short(ih_key), "event": ""}
+        self._trk(domain)["last_ts"] = now
         qs     = parse_qs(urlparse(url).query, keep_blank_values=True)
         event  = qs.get("event", [""])[0]
+        self._last_announce["event"] = event
 
         if event != "stopped":
             self._cancel_stopped(ih_key)
@@ -1176,6 +707,8 @@ class NewGreedyAddon:
 
         if st._size_bytes <= 0:
             st._size_bytes = max(real_dl + left, int(st._seed_fake_dl))
+        elif left > st._size_bytes:
+            st._size_bytes = left
 
         seen_key = ih_key + KEY_SEP + domain
         last     = self._last_seen.get(seen_key, 0)
@@ -1186,6 +719,10 @@ class NewGreedyAddon:
         self._desync_cache[seen_key] = dfactor
         interval = self._effective_interval(st, domain, elapsed, dfactor)
         self._last_seen[seen_key] = now
+        # upload is credited on the torrent's own clock: with several trackers, each
+        # announce only covers the time since the previous one, whatever its tracker
+        # and a torrent seen for the first time has no upload behind it yet (event=started)
+        interval = min(interval, max(0.0, now - prev_ts)) if prev_ts > 0 else 0.0
 
         swarm_key = domain + KEY_SEP + ih_key
         if swarm_key in self._swarm_leechers:
@@ -1199,38 +736,40 @@ class NewGreedyAddon:
         tc = self._tracker_cumul.setdefault(domain, {"ul": 0.0, "dl": 0.0, "ts": now})
         tc["ts"] = now
         tc["dl"] += delta_dl
-        max_global = self._max_global_r
-        ov = self._tracker_cfg.get(domain, {})
-        if "max_global_ratio_per_tracker" in ov:
-            try:
-                max_global = float(ov["max_global_ratio_per_tracker"])
-            except (ValueError, TypeError):
-                pass
+        max_global = self._override(domain, "max_global_ratio_per_tracker", self._max_global_r)
         if tc["dl"] > 0 and (tc["ul"] + delta_ul) / tc["dl"] > max_global:
-            allowed_delta = max(0.0, max_global * tc["dl"] - tc["ul"])
-            new_ul = max(st._prev_rep_ul, st._prev_rep_ul + allowed_delta)
-            delta_ul = new_ul - st._cumul_rep_ul
-            st._cumul_rep_ul = st._prev_rep_ul = new_ul
-            logger.info("[GLOBAL_CAP] %s | tracker_ratio capped -> UL adjusted to %.1fM",
-                        domain, new_ul / 1e6)
-            notify("global_cap", "Global tracker cap reached",
-                          f"{domain} hit the {max_global} aggregate ratio cap; upload was reduced.",
-                          dedup_key="cap:" + domain)
+            # compute() already moved the counters: only the increment it added is cut
+            allowed_delta = min(delta_ul, max(0.0, max_global * tc["dl"] - tc["ul"]))
+            if allowed_delta < delta_ul:
+                new_ul = (new_ul - delta_ul) + allowed_delta
+                delta_ul = allowed_delta
+                st._cumul_rep_ul = st._prev_rep_ul = new_ul
+                logger.info("[GLOBAL_CAP] %s | tracker_ratio capped -> UL adjusted to %.1fM",
+                            domain, new_ul / 1e6)
+                notify("global_cap", "Global tracker cap reached",
+                       f"{domain} hit the {max_global} aggregate ratio cap; upload was reduced.",
+                       dedup_key="cap:" + domain)
         tc["ul"] += delta_ul
         st.record_tracker(domain, delta_ul, delta_dl)
         self._bandwidth_record(delta_ul)
 
-        if st._target_reached and st._ann_count % 20 == 1:
+        if st._just_reached:
+            st._just_reached = False
+            shown = st._target_ratio - st._target_buf
+            meta = datastore.registry_meta(self._registry, ih_key)
+            name = meta.get("name", "") if isinstance(meta, dict) else ""
+            logger.info("[TARGET_REACHED] %s@%s - ratio target %.2f reached, injection stopped",
+                        _short(ih_key), domain, shown)
             notify("target_reached", "Target ratio reached",
-                          f"{ih_key} reached ratio {st._target_ratio:.2f} on {domain}.",
-                          dedup_key="target:" + ih_key)
+                   f"{name or _short(ih_key)} reached ratio {shown:.2f} on {domain}.",
+                   dedup_key="target:" + _short(ih_key))
 
         gap = max(0.0, now - prev_ts) if prev_ts > 0 else 0.0
         reported_dl, reported_left = st.coherent_progress(left, real_dl, new_dl,
                                                           gap, self._dl_cap)
         if st._dl_capped:
             logger.debug("[DL_CAP] %s@%s - reported download held to %.1fM, %.0fM left",
-                         ih_key, domain, reported_dl / 1e6, reported_left / 1e6)
+                         _short(ih_key), domain, reported_dl / 1e6, reported_left / 1e6)
 
         patches = {
             "uploaded":   str(int(new_ul)),
@@ -1311,19 +850,31 @@ class NewGreedyAddon:
 
         if st._cumul_rep_dl > 0:
             logger.info("[%-4s] %-8s | DL:%7.1fM UL:%7.1fM +%6.1fM R:%.2f ETA:~%da #%d%s",
-                        mode, ih_key, st._cumul_rep_dl / 1e6, new_ul / 1e6,
+                        mode, _short(ih_key), st._cumul_rep_dl / 1e6, new_ul / 1e6,
                         delta_ul / 1e6, ratio, eta, st._ann_count, flags)
         else:
             logger.info("[%-4s] %-8s | UL:%7.1fM +%6.1fM #%d%s",
-                        mode, ih_key, new_ul / 1e6, delta_ul / 1e6, st._ann_count, flags)
+                        mode, _short(ih_key), new_ul / 1e6, delta_ul / 1e6, st._ann_count, flags)
 
         if event == "stopped":
             self._note_stopped(ih_key, domain, now)
-        if self._persist:
-            self._save_stats()
-        self._clean_memory()
+        self._dirty = True
 
     def response(self, flow: http.HTTPFlow):
+        with self._lock:
+            self._response(flow)
+
+    def error(self, flow: http.HTTPFlow):
+        url = flow.request.pretty_url
+        if not self._is_announce(url) or not self._tracker_allowed(url):
+            return
+        domain = _tracker_domain(url)
+        reason = str(flow.error.msg if flow.error else "connection error")[:120]
+        with self._lock:
+            self._trk(domain)["last_code"] = "error: " + reason
+            self._record_tracker_error(domain, reason)
+
+    def _response(self, flow):
         url = flow.request.pretty_url
         if not self._is_announce(url):
             return
@@ -1332,12 +883,13 @@ class NewGreedyAddon:
         q_start   = raw_path.find(b"?")
         raw_query = raw_path[q_start + 1:] if q_start != -1 else b""
         ih_hex    = _extract_infohash(raw_query)
-        if not ih_hex or len(ih_hex) < 6:
+        if not ih_hex or len(ih_hex) < MIN_HASH_LEN:
             return
-        ih_key = ih_hex[:8]
+        ih_key = ih_hex
         try:
+            self._trk(domain)["last_code"] = str(flow.response.status_code)
             if flow.response.status_code >= 500:
-                self._record_tracker_error(domain)
+                self._record_tracker_error(domain, f"HTTP {flow.response.status_code}")
             else:
                 self._record_tracker_success(domain)
             body = flow.response.content
@@ -1349,7 +901,7 @@ class NewGreedyAddon:
             interval = bd_find_int(body, b"interval")
             if interval > 0 and st._tracker_intervals.get(domain) != interval:
                 st._tracker_intervals[domain] = interval
-                logger.debug("[INTERVAL] %s@%s - tracker interval %ds", ih_key, domain, interval)
+                logger.debug("[INTERVAL] %s@%s - tracker interval %ds", _short(ih_key), domain, interval)
             if interval > 0 and self._desync and not self._dry_run:
                 self._rewrite_interval(flow, body, st, ih_key, domain, interval)
             incomplete = bd_find_int(body, b"incomplete")
@@ -1357,9 +909,9 @@ class NewGreedyAddon:
                 self._swarm_leechers[domain + KEY_SEP + ih_key] = incomplete
                 st._leecher_count = incomplete
                 if incomplete == 0:
-                    logger.debug("[SWARM] %s@%s - 0 leechers, stagnation forced", ih_key, domain)
-        except Exception:
-            pass
+                    logger.debug("[SWARM] %s@%s - 0 leechers, stagnation forced", _short(ih_key), domain)
+        except Exception as e:
+            logger.debug("response handling failed for %s@%s: %s", _short(ih_key), domain, e, exc_info=True)
 
     def _capture_trackerid(self, body, st, ih_key, domain):
         tid = bd_top_str(body, b"trackerid", TRACKERID_MAX)
@@ -1373,7 +925,7 @@ class NewGreedyAddon:
             for k in list(st._trackerids)[:-16]:
                 del st._trackerids[k]
         logger.debug("[TRACKERID] %s@%s - stored, echoed from the next announce on",
-                     ih_key, domain)
+                     _short(ih_key), domain)
 
     def _rewrite_interval(self, flow, body, st, ih_key, domain, interval):
         if not body.startswith(b"d") or b"14:failure reason" in body:
@@ -1397,12 +949,60 @@ class NewGreedyAddon:
         if patched == body:
             return
         flow.response.content = patched
-        logger.debug("[DESYNC] %s@%s - announce interval %ds -> %ds", ih_key, domain, interval, shifted)
+        logger.debug("[DESYNC] %s@%s - announce interval %ds -> %ds", _short(ih_key), domain, interval, shifted)
 
     def done(self):
-        if self._persist:
-            self._save_stats(force=True)
+        self._stop_evt.set()
+        self._flush_consume_queue()
+        self._save_stats(force=True)
+        # mitmproxy may start the replacement addon before this one is done: keep its status
+        if datastore.read_status().get("started") == self._session_start:
+            self._write_status(state="stopped")
         logger.info("NewGreedy %s stopping - stats saved.", VERSION)
 
 
-addons = [NewGreedyAddon()]
+class FailClosedAddon:
+    """Loaded instead of the engine when it cannot start: announces are answered with a
+    tracker failure that names the problem, instead of reaching the tracker unmodified."""
+
+    def __init__(self, reason):
+        self.reason = reason
+        # a warning, not an error: mitmdump quits when an error is logged while it starts,
+        # and announces would then fail with a refused connection instead of this message
+        logger.warning("[ENGINE_FAILED] %s - announces are blocked until NewGreedy is fixed "
+                       "and restarted", reason)
+        # written by hand: when the imports failed, datastore and notify are not loaded
+        status = {"state": "failed", "error": reason, "version": ADDON_VERSION,
+                  "pid": os.getpid(), "started": time.time(), "heartbeat": time.time()}
+        try:
+            tmp = _DATA / ".addon_status.json.tmp"
+            tmp.write_text(json.dumps(status), encoding="utf-8")
+            os.replace(tmp, _DATA / ".addon_status.json")
+        except Exception:
+            pass
+        try:
+            from _version import notify as _notify
+            _notify("engine_failed", "NewGreedy engine failed", reason, dedup_key="engine_failed")
+        except Exception:
+            pass
+
+    def request(self, flow: http.HTTPFlow):
+        path = urlparse(flow.request.pretty_url).path
+        if "announce" not in path or "scrape" in path:
+            return
+        msg = ("NewGreedy engine not running: " + self.reason)[:300].encode("utf-8", "replace")
+        body = b"d14:failure reason" + str(len(msg)).encode() + b":" + msg + b"e"
+        flow.response = http.Response.make(200, body, {"Content-Type": "text/plain"})
+
+
+def _make_addon():
+    if _IMPORT_ERROR:
+        return FailClosedAddon(_IMPORT_ERROR)
+    try:
+        return NewGreedyAddon()
+    except Exception as e:
+        logger.warning("engine start failed", exc_info=True)
+        return FailClosedAddon(f"{type(e).__name__}: {e}")
+
+
+addons = [_make_addon()]
