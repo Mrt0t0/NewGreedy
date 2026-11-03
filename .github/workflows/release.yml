@@ -1,0 +1,49 @@
+# NewGreedy — release assets: the zip the one-click update installs, and its checksum.
+# The updater refuses a release that lacks either file.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  assets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the version matches the tag
+        run: |
+          grep -q "VERSION     = \"${GITHUB_REF_NAME}\"" _version.py \
+            || { echo "::error::_version.py VERSION does not match ${GITHUB_REF_NAME}"; exit 1; }
+
+      - name: Build the archive and its checksum
+        run: |
+          NAME="NewGreedy-${GITHUB_REF_NAME}"
+          mkdir -p "dist/$NAME"
+          git archive --format=tar HEAD | tar -x -C "dist/$NAME"
+          rm -rf "dist/$NAME/.github"
+          (cd dist && zip -qr "$NAME.zip" "$NAME")
+          (cd dist && sha256sum "$NAME.zip" > "$NAME.zip.sha256")
+          cat "dist/$NAME.zip.sha256"
+          # v1.7.7 and older read the checksum from the release notes, not from the .sha256 file:
+          # keep it the only 64-character hex string of the notes
+          {
+            echo "Changelog: see the README, section Changelog."
+            echo
+            echo "SHA-256 of $NAME.zip:"
+            echo
+            echo "    $(cut -d' ' -f1 "dist/$NAME.zip.sha256")"
+          } > dist/notes.md
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/NewGreedy-${{ github.ref_name }}.zip
+            dist/NewGreedy-${{ github.ref_name }}.zip.sha256
+          body_path: dist/notes.md
+          prerelease: ${{ contains(github.ref_name, '-') }}
